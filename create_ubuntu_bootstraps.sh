@@ -142,13 +142,12 @@ tar xf cmake.tar.gz
 tar xf ccache.tar.gz
 tar xf meson.tar.gz -C /usr/local
 ln -s /usr/local/meson-${meson_version}/meson.py /usr/local/bin/meson
+bash mingw-w64-build x86_64
+bash mingw-w64-build i686
 export CC=gcc-11
 export CXX=g++-11
 export CFLAGS="-O2"
 export CXXFLAGS="-O2"
-chmod +x mingw-w64-build
-./mingw-w64-build x86_64
-./mingw-w64-build i686
 cd cmake-${cmake_version}
 ./bootstrap --parallel=$(nproc)
 make -j$(nproc) install
