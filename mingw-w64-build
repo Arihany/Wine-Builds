@@ -16,11 +16,11 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-ROOT_PATH="/opt/mingw-build"
+ROOT_PATH="/opt/mingw"
 
 MINGW_W64_BRANCH="master"
-BINUTILS_BRANCH="binutils-2_43-branch"
-GCC_BRANCH="releases/gcc-14"
+BINUTILS_BRANCH="binutils-2_42-branch"
+GCC_BRANCH="releases/gcc-12"
 
 ENABLE_THREADS="--enable-threads=posix"
 
