@@ -160,19 +160,6 @@ jobs:
           echo "CCACHE_MAXSIZE=${CCACHE_MAXSIZE}" >> $GITHUB_ENV
           ccache -p || true
 
-        run: |
-          sudo mkdir -p /usr/local/bin
-          for t in arm64ec-w64-mingw32 aarch64-w64-mingw32 i686-w64-mingw32; do
-            for c in clang clang++; do
-              sudo ln -sf "$(command -v ccache)" "/usr/local/bin/${t}-${c}"
-            done
-          done
-          echo "CCACHE_DIR=${CCACHE_DIR}" >> $GITHUB_ENV
-          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
-          echo "CCACHE_COMPRESS=${CCACHE_COMPRESS}" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=${CCACHE_MAXSIZE}" >> $GITHUB_ENV
-          ccache -p || true
-
       - name: Resolve wine tag -> commit
         id: pin
         shell: bash
@@ -227,24 +214,32 @@ jobs:
           set -euo pipefail
 
           missing=0
+          ST_PATH="${STAGE}"
+
           for d in aarch64-unix aarch64-windows i386-windows; do
-            if [[ ! -d "${STAGE}/lib/wine/${d}" ]]; then
-              echo "::error title=Missing triplet::${d} missing under lib/wine"
+            if [[ ! -d "$ST_PATH/lib/wine/$d" ]]; then
+              echo "::error title=Missing triplet::$d missing under lib/wine"
               missing=1
             fi
           done
 
-          if [[ ! -f "${STAGE}/share/wine/wine.inf" ]]; then
+          if [[ ! -f "$ST_PATH/share/wine/wine.inf" ]]; then
             echo "::error title=Missing wine.inf::share/wine/wine.inf missing"
             missing=1
           fi
 
-          echo "[/bin]"
-          find "${STAGE}/bin" -maxdepth 1 -type f -printf "%f
-" | sort || true
-          echo "[/lib/wine]"
-          find "${STAGE}/lib/wine" -maxdepth 1 -type d -printf "%f
-" | sort || true
+          # Safe listings without fragile quoting
+          echo ::group::bin
+          if [[ -d "$ST_PATH/bin" ]]; then
+            find "$ST_PATH/bin" -maxdepth 1 -type f -print0 | xargs -0 -r -n1 basename | sort || true
+          fi
+          echo ::endgroup::
+
+          echo ::group::lib/wine
+          if [[ -d "$ST_PATH/lib/wine" ]]; then
+            find "$ST_PATH/lib/wine" -maxdepth 1 -mindepth 1 -type d -print0 | xargs -0 -r -n1 basename | sort || true
+          fi
+          echo ::endgroup::
 
           exit ${missing}
 
