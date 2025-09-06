@@ -150,8 +150,11 @@ jobs:
             ccache-${{ runner.os }}-
 
       - name: Install build deps (incl. Debian Wine control.in hints)
+        shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update -y -o Acquire::Retries=3
+          # NOTE: 중간에 주석 넣으면 백슬래시 라인-컨티뉴가 깨져 다음 줄이 명령으로 실행됨
           sudo apt-get install -y --no-install-recommends \
             build-essential clang lld git curl jq xz-utils zstd rsync pkg-config \
             bison flex gettext autoconf automake libtool \
@@ -162,13 +165,25 @@ jobs:
             libasound2-dev libpulse-dev libudev-dev libvulkan-dev libopengl-dev \
             ocl-icd-opencl-dev zlib1g-dev libjpeg-dev libpng-dev libtiff-dev \
             libgsm1-dev libldap2-dev libpcap0.8-dev ccache \
-            # Extra deps aligned with Debian's wine debian/control.in
             libgnutls28-dev liblcms2-dev libkrb5-dev libcups2-dev \
             libgphoto2-dev libsane-dev libmpg123-dev libsdl2-dev libopenal-dev \
             libosmesa6-dev libvkd3d-dev gstreamer1.0-plugins-base-dev \
             libgstreamer1.0-dev libcapi20-dev libxslt1-dev libxml2-dev libglu1-mesa-dev
 
       - name: Setup ccache masquerade for MinGW-LLVM
+        run: |
+          sudo mkdir -p /usr/local/bin
+          for t in arm64ec-w64-mingw32 aarch64-w64-mingw32 i686-w64-mingw32; do
+            for c in clang clang++; do
+              sudo ln -sf "$(command -v ccache)" "/usr/local/bin/${t}-${c}"
+            done
+          done
+          echo "CCACHE_DIR=${CCACHE_DIR}" >> $GITHUB_ENV
+          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESS=${CCACHE_COMPRESS}" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=${CCACHE_MAXSIZE}" >> $GITHUB_ENV
+          ccache -p || true
+
         run: |
           sudo mkdir -p /usr/local/bin
           for t in arm64ec-w64-mingw32 aarch64-w64-mingw32 i686-w64-mingw32; do
