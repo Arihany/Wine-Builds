@@ -184,13 +184,17 @@ jobs:
           echo "CCACHE_MAXSIZE=${CCACHE_MAXSIZE}" >> $GITHUB_ENV
           ccache -p || true
 
-      - name: Resolve wine tag -> commit
+      - name: Resolve wine tag -> commit (peeled)
         id: pin
         shell: bash
         run: |
           set -euo pipefail
           TAG='${{ inputs.wine_tag }}'
-          git ls-remote --tags https://github.com/ValveSoftware/wine.git "refs/tags/${TAG}" > out.txt
+          # Try peeled commit for annotated tags first
+          git ls-remote --tags https://github.com/ValveSoftware/wine.git "refs/tags/${TAG}^{}" > out.txt || true
+          if [[ ! -s out.txt ]]; then
+            git ls-remote --tags https://github.com/ValveSoftware/wine.git "refs/tags/${TAG}" > out.txt || true
+          fi
           if [[ ! -s out.txt ]]; then
             echo "Tag not found: ${TAG}" >&2
             exit 1
@@ -205,6 +209,13 @@ jobs:
           git -C src-wine fetch --depth=1 origin ${{ steps.pin.outputs.wine_sha }}
           git -C src-wine checkout ${{ steps.pin.outputs.wine_sha }}
           git -C src-wine log -1 --oneline
+
+      - name: Bootstrap configure (autogen.sh)
+        working-directory: src-wine
+        run: |
+          set -euo pipefail
+          ./autogen.sh
+          test -x configure || { echo "autogen.sh did not produce ./configure" >&2; exit 1; }
 
       - name: Configure (ARM64EC + AArch64 + i386) with clang
         working-directory: src-wine
