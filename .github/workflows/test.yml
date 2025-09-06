@@ -184,19 +184,6 @@ jobs:
           echo "CCACHE_MAXSIZE=${CCACHE_MAXSIZE}" >> $GITHUB_ENV
           ccache -p || true
 
-        run: |
-          sudo mkdir -p /usr/local/bin
-          for t in arm64ec-w64-mingw32 aarch64-w64-mingw32 i686-w64-mingw32; do
-            for c in clang clang++; do
-              sudo ln -sf "$(command -v ccache)" "/usr/local/bin/${t}-${c}"
-            done
-          done
-          echo "CCACHE_DIR=${CCACHE_DIR}" >> $GITHUB_ENV
-          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
-          echo "CCACHE_COMPRESS=${CCACHE_COMPRESS}" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=${CCACHE_MAXSIZE}" >> $GITHUB_ENV
-          ccache -p || true
-
       - name: Resolve wine tag -> commit
         id: pin
         shell: bash
