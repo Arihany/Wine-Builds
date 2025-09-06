@@ -72,17 +72,22 @@ jobs:
                    -H 'Accept: application/vnd.github+json' \
                    "$api")
 
-          match=$(jq -r --arg hp "$host_pat" '
+          # Use heredoc to avoid shell-escape problems in jq regex
+          read -r -d '' JQ_FILTER <<'JQ'
             .[] |
             .tag_name as $tag |
             .assets[]? |
-            select(.name | test("(?i)llvm-mingw-.*-ubuntu-.*" + $hp + ".*(\.tar\.(xz|zst|gz))$")) |
+            select(
+              .name | test("(?i)llvm-mingw-.*-(ubuntu|linux)-.*" + $hp + ".*(\.tar\.(xz|zst|gz))$")
+            ) |
             [$tag, .browser_download_url] | @tsv
-          ' <<<"$json" | head -n1)
+          JQ
+
+          match=$(jq -r --arg hp "$host_pat" "$JQ_FILTER" <<<"$json" | head -n1 || true)
 
           if [[ -z "${match}" ]]; then
             echo "No matching llvm-mingw asset found in last ${per_page} releases of bylaws/llvm-mingw." >&2
-            echo "Searched pattern: llvm-mingw-*-ubuntu-*(x86_64|aarch64).*(.tar.(xz|zst|gz))" >&2
+            echo "Searched pattern: llvm-mingw-*-{ubuntu|linux}-*${host_pat}*.tar.{xz|zst|gz}" >&2
             echo "You can supply 'toolchain_url' input to override." >&2
             exit 1
           fi
