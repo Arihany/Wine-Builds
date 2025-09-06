@@ -90,10 +90,9 @@ jobs:
             | .tag_name as $tag
             | .assets[]?
             | select(
-                .name
-                | test("(?i)llvm-mingw-.*-(ubuntu|linux)-.*") and
-                  test(env.HOST_PAT) and
-                  test("\.tar\.(xz|zst|gz)$")
+                (.name | test("(?i)llvm-mingw-.*-(ubuntu|linux)-.*")) and
+                (.name | test(env.HOST_PAT)) and
+                (.name | test("[.]tar[.](xz|zst|gz)$"))
               )
             | [$tag, .browser_download_url]
             | @tsv
