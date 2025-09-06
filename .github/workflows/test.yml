@@ -7,6 +7,18 @@ on:
         description: 'ValveSoftware/wine tag (e.g. proton-wine-10.0-2d)'
         required: true
         default: 'proton-wine-10.0-2d'
+      toolchain_url:
+        description: 'Override URL for FEX ARM64EC LLVM-MinGW toolchain asset (optional)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: wine-${{ github.ref }}-${{ inputs.wine_tag }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -18,7 +30,7 @@ jobs:
       LLVM_TC_DIR: ${{ github.workspace }}/.toolchains/llvm-mingw-arm64ec
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 4G
-      CCACHE_COMPRESS: "1"
+      CCACHE_COMPRESS: '1'
 
     steps:
       - name: Checkout
@@ -27,15 +39,48 @@ jobs:
       - name: Prepare dirs
         run: mkdir -p "$TOOLCHAIN_ROOT" "$CCACHE_DIR"
 
-      - name: Query FEX ARM64EC toolchain meta
+      - name: Query FEX ARM64EC toolchain meta (robust, multi-release)
         id: tcmeta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          set -e
-          json=$(curl -fsSL https://api.github.com/repos/FEX-Emu/FEX/releases/latest)
-          tag=$(jq -r '.tag_name' <<<"$json")
-          url=$(jq -r '.assets[] | select(.name | test("arm64ec.*(ubuntu|linux).*x86_64.*\\.(tar\\.(xz|zst))$")) | .browser_download_url' <<<"$json" | head -n1)
-          [[ -n "$tag" && -n "$url" ]] || { echo "FEX ARM64EC toolchain asset not found"; exit 1; }
+          set -euo pipefail
+
+          # 1) Manual override, if provided
+          override_url='${{ inputs.toolchain_url }}'
+          if [[ -n "${override_url}" ]]; then
+            echo 'Using override toolchain URL'
+            echo "tag=override" >> "$GITHUB_OUTPUT"
+            echo "url=${override_url}" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # 2) Query recent releases and scan assets with a tolerant regex
+          per_page=20
+          api="https://api.github.com/repos/FEX-Emu/FEX/releases?per_page=${per_page}"
+          json=$(curl -fsSL \
+                   -H "Authorization: Bearer ${GH_TOKEN}" \
+                   -H 'Accept: application/vnd.github+json' \
+                   "$api")
+
+          match=$(jq -r '
+            .[] |
+            .tag_name as $tag |
+            .assets[]? |
+            select(.name | test("(?i)arm64ec.*(ubuntu|linux).*(x86_64|amd64|x64).*(\\.tar\\.(xz|zst))$")) |
+            [$tag, .browser_download_url] | @tsv
+          ' <<<"$json" | head -n1)
+
+          if [[ -z "${match}" ]]; then
+            echo "No matching ARM64EC toolchain asset found in last ${per_page} releases." >&2
+            echo "Searched pattern: arm64ec.*(ubuntu|linux).*(x86_64|amd64|x64).*(.tar.(xz|zst))" >&2
+            echo "You can supply 'toolchain_url' input to override." >&2
+            exit 1
+          fi
+
+          tag=$(cut -f1 <<<"$match")
+          url=$(cut -f2 <<<"$match")
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
@@ -50,15 +95,16 @@ jobs:
         if: steps.cache_tc.outputs.cache-hit != 'true'
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
           mkdir -p "$LLVM_TC_DIR"
           cd "$TOOLCHAIN_ROOT"
           file=$(basename "${{ steps.tcmeta.outputs.url }}")
-          curl -L --retry 5 -o "$file" "${{ steps.tcmeta.outputs.url }}"
+          echo "Downloading: $file"
+          curl -L --retry 5 --retry-delay 3 -o "$file" "${{ steps.tcmeta.outputs.url }}"
           case "$file" in
-            *.tar.xz) tar -C "$LLVM_TC_DIR" --strip-components=1 -xf "$file" ;;
+            *.tar.xz)  tar -C "$LLVM_TC_DIR" --strip-components=1 -xf "$file" ;;
             *.tar.zst) tar --zstd -C "$LLVM_TC_DIR" --strip-components=1 -xf "$file" ;;
-            *) echo "Unknown archive: $file"; exit 1 ;;
+            *) echo "Unknown archive format: $file" >&2; exit 1 ;;
           esac
 
       - name: Add toolchain to PATH
@@ -74,9 +120,9 @@ jobs:
 
       - name: Install build deps
         run: |
-          sudo apt-get update
+          sudo apt-get update -y -o Acquire::Retries=3
           sudo apt-get install -y --no-install-recommends \
-            build-essential clang lld git curl jq xz-utils rsync pkg-config \
+            build-essential clang lld git curl jq xz-utils zstd rsync pkg-config \
             bison flex gettext autoconf automake libtool \
             libfreetype6-dev libfontconfig1-dev libglib2.0-dev libunwind-dev \
             libx11-dev libxext-dev libxi-dev libxrandr-dev libxrender-dev \
@@ -104,11 +150,11 @@ jobs:
         id: pin
         shell: bash
         run: |
-          set -e
-          TAG="${{ inputs.wine_tag }}"
+          set -euo pipefail
+          TAG='${{ inputs.wine_tag }}'
           git ls-remote --tags https://github.com/ValveSoftware/wine.git "refs/tags/${TAG}" > out.txt
           if [[ ! -s out.txt ]]; then
-            echo "Tag not found: ${TAG}"
+            echo "Tag not found: ${TAG}" >&2
             exit 1
           fi
           SHA=$(awk '{print $1}' out.txt)
@@ -150,7 +196,7 @@ jobs:
 
       - name: Verify required lib/wine triplets
         run: |
-          set -e
+          set -euo pipefail
           for d in aarch64-unix aarch64-windows i386-windows; do
             test -d "${STAGE}/lib/wine/$d" || { echo "::error::$d missing under lib/wine"; exit 1; }
           done
