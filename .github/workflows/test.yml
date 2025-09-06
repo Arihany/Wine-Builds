@@ -8,7 +8,7 @@ on:
         required: true
         default: 'proton-wine-10.0-2d'
       toolchain_url:
-        description: 'Override URL for FEX ARM64EC LLVM-MinGW toolchain asset (optional)'
+        description: 'Override URL for ARM64EC llvm-mingw toolchain asset from bylaws/llvm-mingw releases (optional)'
         required: false
         default: ''
 
@@ -39,7 +39,7 @@ jobs:
       - name: Prepare dirs
         run: mkdir -p "$TOOLCHAIN_ROOT" "$CCACHE_DIR"
 
-      - name: Query FEX ARM64EC toolchain meta (robust, multi-release)
+      - name: Query ARM64EC llvm-mingw meta (bylaws/llvm-mingw releases)
         id: tcmeta
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -56,25 +56,33 @@ jobs:
             exit 0
           fi
 
-          # 2) Query recent releases and scan assets with a tolerant regex
-          per_page=20
-          api="https://api.github.com/repos/FEX-Emu/FEX/releases?per_page=${per_page}"
+          # 2) Detect host arch to choose the right cross-compiler package
+          host=$(uname -m)
+          case "$host" in
+            x86_64|amd64) host_pat='(x86_64|amd64|x64)';;
+            aarch64|arm64) host_pat='(aarch64|arm64)';;
+            *) echo "Unsupported host arch: $host" >&2; exit 1;;
+          esac
+
+          # 3) Query recent releases from bylaws/llvm-mingw and pick a Linux cross package
+          per_page=25
+          api="https://api.github.com/repos/bylaws/llvm-mingw/releases?per_page=${per_page}"
           json=$(curl -fsSL \
                    -H "Authorization: Bearer ${GH_TOKEN}" \
                    -H 'Accept: application/vnd.github+json' \
                    "$api")
 
-          match=$(jq -r '
+          match=$(jq -r --arg hp "$host_pat" '
             .[] |
             .tag_name as $tag |
             .assets[]? |
-            select(.name | test("(?i)arm64ec.*(ubuntu|linux).*(x86_64|amd64|x64).*(\\.tar\\.(xz|zst))$")) |
+            select(.name | test("(?i)llvm-mingw-.*-ubuntu-.*" + $hp + ".*(\.tar\.(xz|zst|gz))$")) |
             [$tag, .browser_download_url] | @tsv
           ' <<<"$json" | head -n1)
 
           if [[ -z "${match}" ]]; then
-            echo "No matching ARM64EC toolchain asset found in last ${per_page} releases." >&2
-            echo "Searched pattern: arm64ec.*(ubuntu|linux).*(x86_64|amd64|x64).*(.tar.(xz|zst))" >&2
+            echo "No matching llvm-mingw asset found in last ${per_page} releases of bylaws/llvm-mingw." >&2
+            echo "Searched pattern: llvm-mingw-*-ubuntu-*(x86_64|aarch64).*(.tar.(xz|zst|gz))" >&2
             echo "You can supply 'toolchain_url' input to override." >&2
             exit 1
           fi
@@ -104,6 +112,7 @@ jobs:
           case "$file" in
             *.tar.xz)  tar -C "$LLVM_TC_DIR" --strip-components=1 -xf "$file" ;;
             *.tar.zst) tar --zstd -C "$LLVM_TC_DIR" --strip-components=1 -xf "$file" ;;
+            *.tar.gz)  tar -C "$LLVM_TC_DIR" --strip-components=1 -xzf "$file" ;;
             *) echo "Unknown archive format: $file" >&2; exit 1 ;;
           esac
 
@@ -201,8 +210,10 @@ jobs:
             test -d "${STAGE}/lib/wine/$d" || { echo "::error::$d missing under lib/wine"; exit 1; }
           done
           test -f "${STAGE}/share/wine/wine.inf" || { echo "::error::share/wine/wine.inf missing"; exit 1; }
-          echo "[/bin]" && find "${STAGE}/bin" -maxdepth 1 -type f -printf "%f\n" | sort
-          echo "[/lib/wine]" && find "${STAGE}/lib/wine" -maxdepth 1 -type d -printf "%f\n" | sort
+          echo "[/bin]" && find "${STAGE}/bin" -maxdepth 1 -type f -printf "%f
+" | sort
+          echo "[/lib/wine]" && find "${STAGE}/lib/wine" -maxdepth 1 -type d -printf "%f
+" | sort
 
       - name: Pack runtime (tar.xz, multi-thread)
         run: tar -C "${STAGE}" -I 'xz -T0 -9' -cf wine-${{ inputs.wine_tag }}-arm64ec-wow64.tar.xz .
