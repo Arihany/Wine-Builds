@@ -167,7 +167,7 @@ jobs:
             libgsm1-dev libldap2-dev libpcap0.8-dev ccache \
             libgnutls28-dev liblcms2-dev libkrb5-dev libcups2-dev \
             libgphoto2-dev libsane-dev libmpg123-dev libsdl2-dev libopenal-dev \
-            libosmesa6-dev libvkd3d-dev gstreamer1.0-plugins-base-dev \
+            libosmesa6-dev libvkd3d-dev libgstreamer-plugins-base1.0-dev \
             libgstreamer1.0-dev libcapi20-dev libxslt1-dev libxml2-dev libglu1-mesa-dev
 
       - name: Setup ccache masquerade for MinGW-LLVM
