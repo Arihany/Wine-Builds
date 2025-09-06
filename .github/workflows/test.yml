@@ -46,6 +46,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          set -x
 
           # 1) Manual override, if provided
           override_url='${{ inputs.toolchain_url }}'
@@ -67,35 +68,52 @@ jobs:
           # 3) Query recent releases from bylaws/llvm-mingw and pick a Linux cross package
           per_page=25
           api="https://api.github.com/repos/bylaws/llvm-mingw/releases?per_page=${per_page}"
-          json=$(curl -fsSL \
-                   -H "Authorization: Bearer ${GH_TOKEN}" \
-                   -H 'Accept: application/vnd.github+json' \
-                   "$api")
+          tmp_json="$(mktemp)"
+          http_code=$(curl -sS \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H 'Accept: application/vnd.github+json' \
+            -o "$tmp_json" \
+            -w '%{http_code}' \
+            "$api")
 
-          # Use heredoc to avoid shell-escape problems in jq regex
-          read -r -d '' JQ_FILTER <<'JQ'
-            .[] |
-            .tag_name as $tag |
-            .assets[]? |
-            select(
-              .name | test("(?i)llvm-mingw-.*-(ubuntu|linux)-.*" + $hp + ".*(\.tar\.(xz|zst|gz))$")
-            ) |
-            [$tag, .browser_download_url] | @tsv
-          JQ
-
-          match=$(jq -r --arg hp "$host_pat" "$JQ_FILTER" <<<"$json" | head -n1 || true)
-
-          if [[ -z "${match}" ]]; then
-            echo "No matching llvm-mingw asset found in last ${per_page} releases of bylaws/llvm-mingw." >&2
-            echo "Searched pattern: llvm-mingw-*-{ubuntu|linux}-*${host_pat}*.tar.{xz|zst|gz}" >&2
-            echo "You can supply 'toolchain_url' input to override." >&2
+          if [[ "$http_code" != "200" ]]; then
+            echo "::error title=GitHub API error::HTTP $http_code from $api"
+            echo "Response (first 200 lines):"
+            sed -n '1,200p' "$tmp_json" || true
             exit 1
           fi
 
-          tag=$(cut -f1 <<<"$match")
-          url=$(cut -f2 <<<"$match")
+          # Build jq filter in a temp file to avoid shell-escape issues
+          jq_filter="$(mktemp)"
+          cat >"$jq_filter" <<'JQ'
+            .[]
+            | .tag_name as $tag
+            | .assets[]?
+            | select(
+                .name
+                | test("(?i)llvm-mingw-.*-(ubuntu|linux)-.*") and
+                  test(env.HOST_PAT) and
+                  test("\.tar\.(xz|zst|gz)$")
+              )
+            | [$tag, .browser_download_url]
+            | @tsv
+          JQ
+
+          HOST_PAT="$host_pat" jq -r -f "$jq_filter" "$tmp_json" | head -n1 > match.txt || true
+
+          if [[ ! -s match.txt ]]; then
+            echo "::error title=No matching asset::Searched last ${per_page} releases; host_pat=$host_pat"
+            echo "Sample asset names from latest release:"
+            jq -r '.[0].assets[]?.name' "$tmp_json" | head -n20 || true
+            exit 1
+          fi
+
+          tag=$(cut -f1 match.txt)
+          url=$(cut -f2 match.txt)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
+
+          rm -f "$tmp_json" "$jq_filter" match.txt
 
       - name: Cache toolchain (extracted)
         id: cache_tc
