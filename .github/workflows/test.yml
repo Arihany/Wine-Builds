@@ -1,12 +1,12 @@
-name: Build Proton-base Wine (ARM64EC, WoW64) — cached
+name: Build Proton-base Wine (ARM64EC, WoW64) — pinned & cached
 
 on:
   workflow_dispatch:
     inputs:
-      wine_ref:
-        description: 'ValveSoftware/wine ref (ex: proton_10.0)'
+      wine_tag:
+        description: 'ValveSoftware/wine tag (e.g. proton-wine-10.0-2d)'
         required: true
-        default: 'proton_10.0'
+        default: 'proton-wine-10.0-2d'
 
 jobs:
   build:
@@ -24,12 +24,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 0) 캐시 디렉토리 준비
       - name: Prepare dirs
-        run: |
-          mkdir -p "$TOOLCHAIN_ROOT" "$CCACHE_DIR"
+        run: mkdir -p "$TOOLCHAIN_ROOT" "$CCACHE_DIR"
 
-      # 1) 최신 FEX ARM64EC 툴체인 메타만 조회(캐시 키에 쓸 태그 추출)
       - name: Query FEX ARM64EC toolchain meta
         id: tcmeta
         shell: bash
@@ -42,7 +39,6 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-      # 2) 툴체인(압축본+해제본) 캐시
       - name: Cache toolchain (extracted)
         id: cache_tc
         uses: actions/cache@v4
@@ -58,28 +54,21 @@ jobs:
           mkdir -p "$LLVM_TC_DIR"
           cd "$TOOLCHAIN_ROOT"
           file=$(basename "${{ steps.tcmeta.outputs.url }}")
-          # 원본 압축본도 보조 캐시
-          echo "::group::Fetch toolchain archive"
-          echo "Downloading $file"
           curl -L --retry 5 -o "$file" "${{ steps.tcmeta.outputs.url }}"
-          echo "::endgroup::"
-          echo "::group::Extract toolchain"
           case "$file" in
             *.tar.xz) tar -C "$LLVM_TC_DIR" --strip-components=1 -xf "$file" ;;
             *.tar.zst) tar --zstd -C "$LLVM_TC_DIR" --strip-components=1 -xf "$file" ;;
             *) echo "Unknown archive: $file"; exit 1 ;;
           esac
-          echo "::endgroup::"
 
       - name: Add toolchain to PATH
         run: echo "PATH=${{ env.LLVM_TC_DIR }}/bin:$PATH" >> $GITHUB_ENV
 
-      # 3) ccache 캐시
       - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ runner.os }}-${{ inputs.wine_ref }}-${{ steps.tcmeta.outputs.tag }}-v1
+          key: ccache-${{ runner.os }}-${{ inputs.wine_tag }}-${{ steps.tcmeta.outputs.tag }}-v1
           restore-keys: |
             ccache-${{ runner.os }}-
 
@@ -97,8 +86,7 @@ jobs:
             ocl-icd-opencl-dev zlib1g-dev libjpeg-dev libpng-dev libtiff-dev \
             libgsm1-dev libldap2-dev libpcap0.8-dev ccache
 
-      # 4) ccache 래퍼 설치: cross-클랭 호출을 ccache가 가로채게 함
-      - name: Setup ccache masquerade for MinGW-LLVM triples
+      - name: Setup ccache masquerade for MinGW-LLVM
         run: |
           sudo mkdir -p /usr/local/bin
           for t in arm64ec-w64-mingw32 aarch64-w64-mingw32 i686-w64-mingw32; do
@@ -112,12 +100,29 @@ jobs:
           echo "CCACHE_MAXSIZE=${CCACHE_MAXSIZE}" >> $GITHUB_ENV
           ccache -p || true
 
-      - name: Clone Valve wine (Proton branch)
+      - name: Resolve wine tag -> commit
+        id: pin
+        shell: bash
         run: |
-          git clone --depth=1 --branch "${{ inputs.wine_ref }}" https://github.com/ValveSoftware/wine.git src-wine
+          set -e
+          TAG="${{ inputs.wine_tag }}"
+          git ls-remote --tags https://github.com/ValveSoftware/wine.git "refs/tags/${TAG}" > out.txt
+          if [[ ! -s out.txt ]]; then
+            echo "Tag not found: ${TAG}"
+            exit 1
+          fi
+          SHA=$(awk '{print $1}' out.txt)
+          echo "wine_sha=$SHA" >> $GITHUB_OUTPUT
+          echo "Pinned wine: $SHA"
+
+      - name: Checkout Valve wine at pinned tag
+        run: |
+          git clone https://github.com/ValveSoftware/wine.git src-wine
+          git -C src-wine fetch --depth=1 origin ${{ steps.pin.outputs.wine_sha }}
+          git -C src-wine checkout ${{ steps.pin.outputs.wine_sha }}
           git -C src-wine log -1 --oneline
 
-      - name: Configure (ARM64EC + AArch64 + i386) with clang toolchain
+      - name: Configure (ARM64EC + AArch64 + i386) with clang
         working-directory: src-wine
         run: |
           mkdir -p build && cd build
@@ -126,7 +131,6 @@ jobs:
             --with-mingw=clang \
             --disable-tests \
             --prefix="${PREFIX}"
-          # 빌드 전 컴파일러 해상도 확인
           which arm64ec-w64-mingw32-clang
           which aarch64-w64-mingw32-clang
           which i686-w64-mingw32-clang
@@ -140,13 +144,11 @@ jobs:
           make install
           mkdir -p "${STAGE}"
           rsync -a "${PREFIX}/" "${STAGE}/"
-          # 데스크톱/문서 제거(런타임만 남기기)
           rm -rf "${STAGE}/share/man" "${STAGE}/share/applications" \
                  "${STAGE}/share/icons" "${STAGE}/share/pixmaps" \
                  "${STAGE}/share/mime" || true
 
-      # 5) 산출물 강제 검증: 필수 디렉토리 3종
-      - name: Verify lib/wine contains required triplets
+      - name: Verify required lib/wine triplets
         run: |
           set -e
           for d in aarch64-unix aarch64-windows i386-windows; do
@@ -157,12 +159,11 @@ jobs:
           echo "[/lib/wine]" && find "${STAGE}/lib/wine" -maxdepth 1 -type d -printf "%f\n" | sort
 
       - name: Pack runtime (tar.xz, multi-thread)
-        run: |
-          tar -C "${STAGE}" -I 'xz -T0 -9' -cf wine-protonbase-arm64ec-wow64.tar.xz .
+        run: tar -C "${STAGE}" -I 'xz -T0 -9' -cf wine-${{ inputs.wine_tag }}-arm64ec-wow64.tar.xz .
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wine-protonbase-arm64ec-wow64
-          path: wine-protonbase-arm64ec-wow64.tar.xz
+          name: wine-${{ inputs.wine_tag }}-arm64ec-wow64
+          path: wine-${{ inputs.wine_tag }}-arm64ec-wow64.tar.xz
           if-no-files-found: error
