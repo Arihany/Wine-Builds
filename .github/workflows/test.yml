@@ -127,7 +127,7 @@ jobs:
           restore-keys: |
             ccache-${{ runner.os }}-
 
-      - name: Install build deps
+      - name: Install build deps (incl. Debian Wine control.in hints)
         run: |
           sudo apt-get update -y -o Acquire::Retries=3
           sudo apt-get install -y --no-install-recommends \
@@ -137,11 +137,29 @@ jobs:
             libx11-dev libxext-dev libxi-dev libxrandr-dev libxrender-dev \
             libxcursor-dev libxfixes-dev libxinerama-dev libxcomposite-dev \
             libxdamage-dev libxkbcommon-dev libwayland-dev libdbus-1-dev \
-            libasound2-dev libpulse-dev libudev-dev libvulkan-dev \
+            libasound2-dev libpulse-dev libudev-dev libvulkan-dev libopengl-dev \
             ocl-icd-opencl-dev zlib1g-dev libjpeg-dev libpng-dev libtiff-dev \
-            libgsm1-dev libldap2-dev libpcap0.8-dev ccache
+            libgsm1-dev libldap2-dev libpcap0.8-dev ccache \
+            # Extra deps aligned with Debian's wine debian/control.in
+            libgnutls28-dev liblcms2-dev libkrb5-dev libcups2-dev \
+            libgphoto2-dev libsane-dev libmpg123-dev libsdl2-dev libopenal-dev \
+            libosmesa6-dev libvkd3d-dev gstreamer1.0-plugins-base-dev \
+            libgstreamer1.0-dev libcapi20-dev libxslt1-dev libxml2-dev libglu1-mesa-dev
 
       - name: Setup ccache masquerade for MinGW-LLVM
+        run: |
+          sudo mkdir -p /usr/local/bin
+          for t in arm64ec-w64-mingw32 aarch64-w64-mingw32 i686-w64-mingw32; do
+            for c in clang clang++; do
+              sudo ln -sf "$(command -v ccache)" "/usr/local/bin/${t}-${c}"
+            done
+          done
+          echo "CCACHE_DIR=${CCACHE_DIR}" >> $GITHUB_ENV
+          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
+          echo "CCACHE_COMPRESS=${CCACHE_COMPRESS}" >> $GITHUB_ENV
+          echo "CCACHE_MAXSIZE=${CCACHE_MAXSIZE}" >> $GITHUB_ENV
+          ccache -p || true
+
         run: |
           sudo mkdir -p /usr/local/bin
           for t in arm64ec-w64-mingw32 aarch64-w64-mingw32 i686-w64-mingw32; do
@@ -204,16 +222,31 @@ jobs:
                  "${STAGE}/share/mime" || true
 
       - name: Verify required lib/wine triplets
+        shell: bash
         run: |
           set -euo pipefail
+
+          missing=0
           for d in aarch64-unix aarch64-windows i386-windows; do
-            test -d "${STAGE}/lib/wine/$d" || { echo "::error::$d missing under lib/wine"; exit 1; }
+            if [[ ! -d "${STAGE}/lib/wine/${d}" ]]; then
+              echo "::error title=Missing triplet::${d} missing under lib/wine"
+              missing=1
+            fi
           done
-          test -f "${STAGE}/share/wine/wine.inf" || { echo "::error::share/wine/wine.inf missing"; exit 1; }
-          echo "[/bin]" && find "${STAGE}/bin" -maxdepth 1 -type f -printf "%f
-" | sort
-          echo "[/lib/wine]" && find "${STAGE}/lib/wine" -maxdepth 1 -type d -printf "%f
-" | sort
+
+          if [[ ! -f "${STAGE}/share/wine/wine.inf" ]]; then
+            echo "::error title=Missing wine.inf::share/wine/wine.inf missing"
+            missing=1
+          fi
+
+          echo "[/bin]"
+          find "${STAGE}/bin" -maxdepth 1 -type f -printf "%f
+" | sort || true
+          echo "[/lib/wine]"
+          find "${STAGE}/lib/wine" -maxdepth 1 -type d -printf "%f
+" | sort || true
+
+          exit ${missing}
 
       - name: Pack runtime (tar.xz, multi-thread)
         run: tar -C "${STAGE}" -I 'xz -T0 -9' -cf wine-${{ inputs.wine_tag }}-arm64ec-wow64.tar.xz .
