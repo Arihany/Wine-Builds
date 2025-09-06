@@ -83,9 +83,24 @@ jobs:
             exit 1
           fi
 
-          # Build jq filter in a temp file to avoid shell-escape issues
-          jq_filter="$(mktemp)"
-          cat >"$jq_filter" <<'JQ'
+          # Build jq filters to avoid shell-escape issues
+          jq_arm64ec="$(mktemp)"
+          cat >"$jq_arm64ec" <<'JQ'
+            .[]
+            | .tag_name as $tag
+            | .assets[]?
+            | select(
+                (.name | test("(?i)llvm-mingw-.*-(ubuntu|linux)-.*")) and
+                (.name | test("(?i)arm64ec")) and
+                (.name | test(env.HOST_PAT)) and
+                (.name | test("[.]tar[.](xz|zst|gz)$"))
+              )
+            | [$tag, .browser_download_url]
+            | @tsv
+          JQ
+
+          jq_generic="$(mktemp)"
+          cat >"$jq_generic" <<'JQ'
             .[]
             | .tag_name as $tag
             | .assets[]?
@@ -98,7 +113,11 @@ jobs:
             | @tsv
           JQ
 
-          HOST_PAT="$host_pat" jq -r -f "$jq_filter" "$tmp_json" | head -n1 > match.txt || true
+          # Prefer explicit *arm64ec* toolchains, fall back to generic if none match
+          HOST_PAT="$host_pat" jq -r -f "$jq_arm64ec" "$tmp_json" | head -n1 > match.txt || true
+          if [[ ! -s match.txt ]]; then
+            HOST_PAT="$host_pat" jq -r -f "$jq_generic" "$tmp_json" | head -n1 > match.txt || true
+          fi
 
           if [[ ! -s match.txt ]]; then
             echo "::error title=No matching asset::Searched last ${per_page} releases; host_pat=$host_pat"
@@ -112,7 +131,7 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-          rm -f "$tmp_json" "$jq_filter" match.txt
+          rm -f "$tmp_json" "$jq_arm64ec" "$jq_generic" match.txt
 
       - name: Cache toolchain (extracted)
         id: cache_tc
@@ -140,6 +159,28 @@ jobs:
 
       - name: Add toolchain to PATH
         run: echo "PATH=${{ env.LLVM_TC_DIR }}/bin:$PATH" >> $GITHUB_ENV
+
+      - name: Verify ARM64EC compiler presence (fail-fast)
+        shell: bash
+        run: |
+          set -euo pipefail
+          need=(arm64ec-w64-mingw32-clang arm64ec-w64-mingw32-clang++ llvm-dlltool llvm-windres)
+          ok=1
+          echo ::group::toolchain-binaries
+          for b in "${need[@]}"; do
+            if ! command -v "$b" >/dev/null 2>&1; then
+              echo "::error title=ARM64EC toolchain missing::$b not found in PATH (toolchain likely lacks ARM64EC).";
+              ok=0
+            else
+              which "$b"
+              "$b" --version | head -n1 || true
+            fi
+          done
+          echo ::endgroup::
+          if [[ $ok -ne 1 ]]; then
+            echo '::error title=Missing ARM64EC support::The selected llvm-mingw does not provide ARM64EC. Use workflow input '"'toolchain_url'"' to point to an ARM64EC-enabled build (e.g. bylaws/llvm-mingw releases).'
+            exit 1
+          fi
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -169,20 +210,6 @@ jobs:
             libgphoto2-dev libsane-dev libmpg123-dev libsdl2-dev libopenal-dev \
             libosmesa6-dev libvkd3d-dev libgstreamer-plugins-base1.0-dev \
             libgstreamer1.0-dev libcapi20-dev libxslt1-dev libxml2-dev libglu1-mesa-dev
-
-      - name: Setup ccache masquerade for MinGW-LLVM
-        run: |
-          sudo mkdir -p /usr/local/bin
-          for t in arm64ec-w64-mingw32 aarch64-w64-mingw32 i686-w64-mingw32; do
-            for c in clang clang++; do
-              sudo ln -sf "$(command -v ccache)" "/usr/local/bin/${t}-${c}"
-            done
-          done
-          echo "CCACHE_DIR=${CCACHE_DIR}" >> $GITHUB_ENV
-          echo "CCACHE_BASEDIR=${GITHUB_WORKSPACE}" >> $GITHUB_ENV
-          echo "CCACHE_COMPRESS=${CCACHE_COMPRESS}" >> $GITHUB_ENV
-          echo "CCACHE_MAXSIZE=${CCACHE_MAXSIZE}" >> $GITHUB_ENV
-          ccache -p || true
 
       - name: Resolve wine tag -> commit (peeled)
         id: pin
@@ -219,16 +246,29 @@ jobs:
 
       - name: Configure (ARM64EC + AArch64 + i386) with clang
         working-directory: src-wine
+        env:
+          # Force Wine's configure to use the right cross compilers and ccache wrappers.
+          arm64ec_CC: ccache arm64ec-w64-mingw32-clang
+          arm64ec_CXX: ccache arm64ec-w64-mingw32-clang++
+          aarch64_CC: ccache aarch64-w64-mingw32-clang
+          aarch64_CXX: ccache aarch64-w64-mingw32-clang++
+          i386_CC: ccache i686-w64-mingw32-clang
+          i386_CXX: ccache i686-w64-mingw32-clang++
+          DLLTOOL: llvm-dlltool
+          WINDRES: llvm-windres
+          AR: llvm-ar
+          RANLIB: llvm-ranlib
         run: |
+          set -euo pipefail
+          which arm64ec-w64-mingw32-clang
+          which aarch64-w64-mingw32-clang
+          which i686-w64-mingw32-clang
           mkdir -p build && cd build
           ../configure \
             --enable-archs=arm64ec,aarch64,i386 \
             --with-mingw=clang \
             --disable-tests \
             --prefix="${PREFIX}"
-          which arm64ec-w64-mingw32-clang
-          which aarch64-w64-mingw32-clang
-          which i686-w64-mingw32-clang
 
       - name: Build & Install (ccache on)
         working-directory: src-wine/build
