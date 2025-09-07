@@ -174,7 +174,7 @@ jobs:
       - name: Add toolchain to PATH
         run: echo "PATH=${{ env.LLVM_TC_DIR }}/bin:$PATH" >> $GITHUB_ENV
 
-      - name: Sanity probe: which clang and arm64ec target
+      - name: Sanity probe which clang and arm64ec target
         shell: bash
         run: |
           set -euo pipefail
