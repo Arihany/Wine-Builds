@@ -33,6 +33,8 @@ jobs:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 4G
       CCACHE_COMPRESS: '1'
+      CCACHE_COMPILERCHECK: content
+      CCACHE_BASEDIR: ${{ github.workspace }}
 
     steps:
       - name: Checkout
@@ -50,7 +52,13 @@ jobs:
           # 0) Manual override
           override_url='${{ inputs.toolchain_url }}'
           if [[ -n "$override_url" ]]; then
-            echo 'tag=override' >> "$GITHUB_OUTPUT"
+            ov_file=$(basename "$override_url")
+            ov_tag="$ov_file"
+            ov_tag="${ov_tag%.tar.xz}"
+            ov_tag="${ov_tag%.tar.zst}"
+            ov_tag="${ov_tag%.tar.gz}"
+            echo "Using override toolchain asset: $ov_file (tag=$ov_tag)"
+            echo "tag=$ov_tag" >> "$GITHUB_OUTPUT"
             echo "url=$override_url" >> "$GITHUB_OUTPUT"
             exit 0
           fi
