@@ -211,17 +211,22 @@ jobs:
           ./autogen.sh
           test -x configure || { echo "autogen.sh did not produce ./configure" >&2; exit 1; }
 
-      - name: Install elegant target shims for clang/clang++ (map arm64ec-windows -> arm64ec-w64-mingw32, array-safe)
+      - name: Install elegant target shims for clang/clang++ (map arm64ec-windows -> arm64ec-w64-mingw32, robust)
         run: |
           set -Eeuo pipefail
           SHIMS_DIR="${GITHUB_WORKSPACE}/.shims"; mkdir -p "$SHIMS_DIR"
-          REAL_CLANG="$(command -v clang)"; REAL_CLANGXX="$(command -v clang++)"
 
-          # clang wrapper (array-safe argument handling)
-          cat >"$SHIMS_DIR/clang" <<EOF
+          # clang wrapper (no variable expansion at write-time; array-safe; avoids recursion)
+          cat >"$SHIMS_DIR/clang" <<'SH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
-          REAL="${REAL_CLANG}"
+          self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+          shim_dir="$(dirname "$self")"
+          # pick the first clang in PATH that is not this shim
+          real="$(type -ap clang | grep -v "^${shim_dir}/clang$" | head -n1)"
+          if [[ -z "${real:-}" ]]; then
+            real="$(command -v clang)"
+          fi
           args=()
           prev_is_target=0
           for a in "$@"; do
@@ -243,15 +248,20 @@ jobs:
                 args+=("$a") ;;
             esac
           done
-          exec "$REAL" "${args[@]}"
-          EOF
+          exec "$real" "${args[@]}"
+          SH
           chmod +x "$SHIMS_DIR/clang"
 
-          # clang++ wrapper (array-safe argument handling)
-          cat >"$SHIMS_DIR/clang++" <<EOF
+          # clang++ wrapper (same logic)
+          cat >"$SHIMS_DIR/clang++" <<'SH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
-          REAL="${REAL_CLANGXX}"
+          self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+          shim_dir="$(dirname "$self")"
+          real="$(type -ap clang++ | grep -v "^${shim_dir}/clang\+\+$" | head -n1)"
+          if [[ -z "${real:-}" ]]; then
+            real="$(command -v clang++)"
+          fi
           args=()
           prev_is_target=0
           for a in "$@"; do
@@ -273,17 +283,16 @@ jobs:
                 args+=("$a") ;;
             esac
           done
-          exec "$REAL" "${args[@]}"
-          EOF
+          exec "$real" "${args[@]}"
+          SH
           chmod +x "$SHIMS_DIR/clang++"
 
           # Ensure shims precede toolchain bin
           echo "PATH=${SHIMS_DIR}:$PATH" >> $GITHUB_ENV
 
-          # Smoke-test wrapper: plain clang must work, and mapping should not break it
+          # Smoke-test wrapper: plain clang must work; target mapping shouldn't crash the wrapper
           echo 'int main(void){return 0;}' > t.c
           clang -c t.c -o t.o
-          # mapping path (may still fail later if target unsupported, but wrapper must not)
           clang -target arm64ec-windows -c t.c -o t2.o || true
           rm -f t.c t.o t2.o || true
 
