@@ -315,6 +315,7 @@ jobs:
           rm -f t.c t.o t2.o || true
 
       - name: Configure (ARM64EC + AArch64 + i386) with clang
+        shell: bash
         working-directory: src-wine
         env:
           SHIM_DEBUG: "1"
@@ -341,7 +342,7 @@ jobs:
 
           mkdir -p build && cd build
 
-          # Run configure with bash -x to get a precise trace, but do not kill the step immediately on non-zero
+          # Run configure with trace and capture logs
           set +e
           bash -x ../configure \
             --enable-archs=arm64ec,aarch64,i386 \
@@ -352,10 +353,9 @@ jobs:
           st=$?
           set -e
 
-          echo ::group::config.log (highlights)
-          if [[ -f config.log ]]; then
-            # Print contextual lines around common failure markers; fall back to last 200 lines
-            if ! grep -nE "(error:|cannot |failed )" config.log | sed -n '1,200p'; then
+          echo ::group::config.log highlights
+          if [ -f config.log ]; then
+            if ! grep -nE 'error:|cannot |failed ' config.log | sed -n '1,200p'; then
               tail -n 200 config.log || true
             fi
           else
@@ -363,11 +363,11 @@ jobs:
           fi
           echo ::endgroup::
 
-          echo ::group::configure.trace (tail)
+          echo ::group::configure.trace head
           sed -n '1,160p' configure.trace.txt || true
           echo ::endgroup::
 
-          if [[ $st -ne 0 ]]; then
+          if [ $st -ne 0 ]; then
             echo "::error title=configure failed::See 'config.log' and 'configure.trace.txt' above"
             exit $st
           fi
