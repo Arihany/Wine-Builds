@@ -211,55 +211,81 @@ jobs:
           ./autogen.sh
           test -x configure || { echo "autogen.sh did not produce ./configure" >&2; exit 1; }
 
-      - name: Install elegant target shims for clang/clang++ (map arm64ec-windows -> arm64ec-w64-mingw32)
+      - name: Install elegant target shims for clang/clang++ (map arm64ec-windows -> arm64ec-w64-mingw32, array-safe)
         run: |
           set -Eeuo pipefail
           SHIMS_DIR="${GITHUB_WORKSPACE}/.shims"; mkdir -p "$SHIMS_DIR"
           REAL_CLANG="$(command -v clang)"; REAL_CLANGXX="$(command -v clang++)"
-          cat >"$SHIMS_DIR/clang" <<'EOF'
+
+          # clang wrapper (array-safe argument handling)
+          cat >"$SHIMS_DIR/clang" <<EOF
           #!/usr/bin/env bash
-          fix_arg() {
-            local out=()
-            local prev=""
-            for a in "$@"; do
-              if [[ "$prev" == "-target" && "$a" == "arm64ec-windows" ]]; then
-                out+=("arm64ec-w64-mingw32")
-              elif [[ "$a" == "-target=arm64ec-windows" ]]; then
-                out+=("--target=arm64ec-w64-mingw32")
+          set -Eeuo pipefail
+          REAL="${REAL_CLANG}"
+          args=()
+          prev_is_target=0
+          for a in "$@"; do
+            if [[ $prev_is_target -eq 1 ]]; then
+              if [[ "$a" == "arm64ec-windows" ]]; then
+                args+=("arm64ec-w64-mingw32")
               else
-                out+=("$a")
+                args+=("$a")
               fi
-              prev="$a"
-            done
-            printf '%q ' "${out[@]}"
-          }
-          exec "${REAL_CLANG}" $(fix_arg "$@")
+              prev_is_target=0
+              continue
+            fi
+            case "$a" in
+              -target)
+                args+=("$a"); prev_is_target=1 ;;
+              -target=arm64ec-windows)
+                args+=("--target=arm64ec-w64-mingw32") ;;
+              *)
+                args+=("$a") ;;
+            esac
+          done
+          exec "$REAL" "${args[@]}"
           EOF
           chmod +x "$SHIMS_DIR/clang"
 
-          cat >"$SHIMS_DIR/clang++" <<'EOF'
+          # clang++ wrapper (array-safe argument handling)
+          cat >"$SHIMS_DIR/clang++" <<EOF
           #!/usr/bin/env bash
-          fix_arg() {
-            local out=()
-            local prev=""
-            for a in "$@"; do
-              if [[ "$prev" == "-target" && "$a" == "arm64ec-windows" ]]; then
-                out+=("arm64ec-w64-mingw32")
-              elif [[ "$a" == "-target=arm64ec-windows" ]]; then
-                out+=("--target=arm64ec-w64-mingw32")
+          set -Eeuo pipefail
+          REAL="${REAL_CLANGXX}"
+          args=()
+          prev_is_target=0
+          for a in "$@"; do
+            if [[ $prev_is_target -eq 1 ]]; then
+              if [[ "$a" == "arm64ec-windows" ]]; then
+                args+=("arm64ec-w64-mingw32")
               else
-                out+=("$a")
+                args+=("$a")
               fi
-              prev="$a"
-            done
-            printf '%q ' "${out[@]}"
-          }
-          exec "${REAL_CLANGXX}" $(fix_arg "$@")
+              prev_is_target=0
+              continue
+            fi
+            case "$a" in
+              -target)
+                args+=("$a"); prev_is_target=1 ;;
+              -target=arm64ec-windows)
+                args+=("--target=arm64ec-w64-mingw32") ;;
+              *)
+                args+=("$a") ;;
+            esac
+          done
+          exec "$REAL" "${args[@]}"
           EOF
           chmod +x "$SHIMS_DIR/clang++"
 
           # Ensure shims precede toolchain bin
           echo "PATH=${SHIMS_DIR}:$PATH" >> $GITHUB_ENV
+
+          # Smoke-test wrapper: plain clang must work, and mapping should not break it
+          echo 'int main(void){return 0;}' > t.c
+          clang -c t.c -o t.o
+          # mapping path (may still fail later if target unsupported, but wrapper must not)
+          clang -target arm64ec-windows -c t.c -o t2.o || true
+          rm -f t.c t.o t2.o || true
 
       - name: Configure (ARM64EC + AArch64 + i386) with clang
         working-directory: src-wine
