@@ -1,4 +1,4 @@
-name: Build Proton-base Wine (ARM64EC, WoW64) — pinned & cached
+name: Build Proton-base Wine (ARM64EC, WoW64) — elegant & pinned
 
 on:
   workflow_dispatch:
@@ -8,18 +8,10 @@ on:
         required: true
         default: 'proton-wine-10.0-2d'
       toolchain_url:
-        description: 'Override URL for ARM64EC llvm-mingw toolchain asset from bylaws/llvm-mingw releases (optional)'
+        description: 'Override URL for llvm-mingw toolchain asset (Linux/Ubuntu tar.*). If empty, auto-select (prefers bylaws ubuntu-20.04 x86_64).'
         required: false
         default: ''
-      toolchain_host:
-        description: 'Host arch for llvm-mingw asset selection: auto | x86_64 | aarch64'
-        required: false
-        default: 'auto'
-        type: choice
-        options:
-          - auto
-          - x86_64
-          - aarch64
+
 permissions:
   contents: read
   actions: read
@@ -27,6 +19,10 @@ permissions:
 concurrency:
   group: wine-${{ github.ref }}-${{ inputs.wine_tag }}
   cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
   build:
@@ -47,95 +43,58 @@ jobs:
       - name: Prepare dirs
         run: mkdir -p "$TOOLCHAIN_ROOT" "$CCACHE_DIR"
 
-      - name: Query ARM64EC llvm-mingw meta (bylaws/llvm-mingw releases)
+      - name: Query llvm-mingw meta (prefer bylaws ubuntu-20.04 x86_64)
         id: tcmeta
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        shell: bash
         run: |
-          set -euo pipefail
-          set -x
-
-          # 1) Manual override, if provided
+          set -Eeuo pipefail
+          # 0) Manual override
           override_url='${{ inputs.toolchain_url }}'
-          if [[ -n "${override_url}" ]]; then
-            echo 'Using override toolchain URL'
-            echo "tag=override" >> "$GITHUB_OUTPUT"
-            echo "url=${override_url}" >> "$GITHUB_OUTPUT"
+          if [[ -n "$override_url" ]]; then
+            echo 'tag=override' >> "$GITHUB_OUTPUT"
+            echo "url=$override_url" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # 2) Decide host arch pattern (override-able)
-          case '${{ inputs.toolchain_host }}' in
-            auto|'') host=$(uname -m) ;;
-            x86_64|amd64|x64) host=x86_64 ;;
-            aarch64|arm64) host=aarch64 ;;
-            *) echo "Invalid toolchain_host: ${{ inputs.toolchain_host }}" >&2; exit 1 ;;
-          esac
-
+          # host arch pattern for generic fallback
+          host=$(uname -m)
           case "$host" in
             x86_64|amd64) host_pat='(x86_64|amd64|x64)';;
             aarch64|arm64) host_pat='(aarch64|arm64)';;
             *) echo "Unsupported host arch: $host" >&2; exit 1;;
           esac
 
-          # 3) Query recent releases from bylaws/llvm-mingw and pick a Linux cross package
           per_page=25
           api="https://api.github.com/repos/bylaws/llvm-mingw/releases?per_page=${per_page}"
-          tmp_json="$(mktemp)"
-          http_code=$(curl -sS \
-            -H "Authorization: Bearer ${GH_TOKEN}" \
-            -H 'Accept: application/vnd.github+json' \
-            -o "$tmp_json" \
-            -w '%{http_code}' \
-            "$api")
-
-          if [[ "$http_code" != "200" ]]; then
-            echo "::error title=GitHub API error::HTTP $http_code from $api"
-            echo "Response (first 200 lines):"
-            sed -n '1,200p' "$tmp_json" || true
-            exit 1
+          tmp_json=$(mktemp)
+          http=$(curl -fsS -H "Authorization: Bearer ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' -o "$tmp_json" -w '%{http_code}' "$api")
+          if [[ "$http" != 200 ]]; then
+            echo "::error title=GitHub API error::HTTP $http from $api"; sed -n '1,120p' "$tmp_json" || true; exit 1
           fi
 
-          # Build jq filters: prefer ubuntu-20.04 x86_64 asset (proven working), then fall back to host-arch generic Linux/Ubuntu
-          jq_prefer_2004_x86_64="$(mktemp)"
-          cat >"$jq_prefer_2004_x86_64" <<'JQ'
-            .[]
-            | .tag_name as $tag
-            | .assets[]?
-            | select(
-                (.name | test("(?i)llvm-mingw-.*-ubuntu-20[.]04-x86_64[.]tar[.](xz|zst|gz)$"))
-              )
-            | [$tag, .browser_download_url]
-            | @tsv
+          jq_first_ubuntu2004=$(mktemp)
+          cat >"$jq_first_ubuntu2004" <<'JQ'
+            .[] | .tag_name as $tag | .assets[]? | select(
+              (.name | test("(?i)llvm-mingw-.*-ubuntu-20[.]04-x86_64[.]tar[.](xz|zst|gz)$"))
+            ) | [$tag, .browser_download_url] | @tsv
           JQ
 
-          jq_generic="$(mktemp)"
+          jq_generic=$(mktemp)
           cat >"$jq_generic" <<'JQ'
-            .[]
-            | .tag_name as $tag
-            | .assets[]?
-            | select(
-                (.name | test("(?i)llvm-mingw-.*-(ubuntu|linux)-")) and
-                (.name | test(env.HOST_PAT)) and
-                (.name | test("[.]tar[.](xz|zst|gz)$"))
-              )
-            | [$tag, .browser_download_url]
-            | @tsv
+            .[] | .tag_name as $tag | .assets[]? | select(
+              (.name | test("(?i)llvm-mingw-.*-(ubuntu|linux)-")) and
+              (.name | test(env.HOST_PAT)) and
+              (.name | test("[.]tar[.](xz|zst|gz)$"))
+            ) | [$tag, .browser_download_url] | @tsv
           JQ
 
-          # 1st preference: ubuntu-20.04-x86_64 tarball (user-proven good)
-          jq -r -f "$jq_prefer_2004_x86_64" "$tmp_json" | head -n1 > match.txt || true
-
-          # Fallback: generic Linux/Ubuntu tarball matching host arch
+          HOST_PAT="$host_pat" jq -r -f "$jq_first_ubuntu2004" "$tmp_json" | head -n1 > match.txt || true
           if [[ ! -s match.txt ]]; then
             HOST_PAT="$host_pat" jq -r -f "$jq_generic" "$tmp_json" | head -n1 > match.txt || true
           fi
-
           if [[ ! -s match.txt ]]; then
-            echo "::error title=No matching llvm-mingw Linux asset::Searched last ${per_page} releases; host_pat=$host_pat"
-            echo "Hint: Provide 'toolchain_url' input (e.g. bylaws 'llvm-mingw-<date>-ucrt-ubuntu-20.04-x86_64.tar.xz')."
-            echo "Sample asset names from latest release:"
+            echo "::error title=No matching llvm-mingw Linux asset::Searched last ${per_page} releases; host=$host (${host_pat})"
             jq -r '.[0].assets[]?.name' "$tmp_json" | head -n20 || true
             exit 1
           fi
@@ -144,8 +103,6 @@ jobs:
           url=$(cut -f2 match.txt)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
-
-          rm -f "$tmp_json" "$jq_prefer_2004_x86_64" "$jq_generic" match.txt
 
       - name: Cache toolchain (extracted)
         id: cache_tc
@@ -156,14 +113,13 @@ jobs:
 
       - name: Download & extract toolchain if cache missed
         if: steps.cache_tc.outputs.cache-hit != 'true'
-        shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           mkdir -p "$LLVM_TC_DIR"
           cd "$TOOLCHAIN_ROOT"
           file=$(basename "${{ steps.tcmeta.outputs.url }}")
           echo "Downloading: $file"
-          curl -L --retry 5 --retry-delay 3 -o "$file" "${{ steps.tcmeta.outputs.url }}"
+          curl -fL --retry 5 --retry-delay 3 -o "$file" "${{ steps.tcmeta.outputs.url }}"
           case "$file" in
             *.tar.xz)  tar -C "$LLVM_TC_DIR" --strip-components=1 -xf "$file" ;;
             *.tar.zst) tar --zstd -C "$LLVM_TC_DIR" --strip-components=1 -xf "$file" ;;
@@ -171,57 +127,34 @@ jobs:
             *) echo "Unknown archive format: $file" >&2; exit 1 ;;
           esac
 
-      - name: Add toolchain to PATH
+      - name: Add toolchain to PATH (prepend)
         run: echo "PATH=${{ env.LLVM_TC_DIR }}/bin:$PATH" >> $GITHUB_ENV
 
-      - name: Sanity probe which clang and arm64ec target
-        shell: bash
+      - name: Sanity probe clang path and arm64ec target
         run: |
-          set -euo pipefail
-          echo ::group::clang-path
+          set -Eeuo pipefail
+          echo ::group::clang
           which clang || true
           clang --version || true
           echo ::endgroup::
+
           echo ::group::arm64ec-probe
           set +e
-          cat > t.c <<'EOF'
-          int main(void){return 0;}
-          EOF
+          printf 'int main(void){return 0;}' > t.c
           clang -target arm64ec-windows -fuse-ld=lld -Wl,-subsystem:console -Wl,-WX -v t.c -o t.exe
           stat t.exe || true
           rm -f t.c t.exe || true
           echo ::endgroup::
 
-      - name: Verify ARM64EC compiler presence (fail-fast)
-        shell: bash
+      - name: Verify ARM64EC toolchain presence (fail-fast)
         run: |
-          set -euo pipefail
-          need=(arm64ec-w64-mingw32-clang arm64ec-w64-mingw32-clang++ llvm-dlltool llvm-windres lld-link)
+          set -Eeuo pipefail
+          need=(arm64ec-w64-mingw32-clang arm64ec-w64-mingw32-clang++ aarch64-w64-mingw32-clang i686-w64-mingw32-clang llvm-dlltool llvm-windres lld-link)
           ok=1
-          echo ::group::toolchain-binaries
           for b in "${need[@]}"; do
-            if ! which "$b" >/dev/null 2>&1; then
-              echo "::error title=ARM64EC toolchain missing::$b not found in PATH.";
-              ok=0
-            else
-              p=$(which "$b")
-              echo "$p"
-              # Don't execute foreign-arch binaries; identify instead.
-              if file -b "$p" | grep -qiE 'aarch64|arm64'; then bin_arch=aarch64; else bin_arch=x86_64; fi
-              host_arch=$(uname -m)
-              echo "binary-arch=$bin_arch host-arch=$host_arch"
-              if [[ "$bin_arch" =~ aarch64 && ! "$host_arch" =~ (aarch64|arm64) ]]; then
-                echo "::error title=Host/Toolchain arch mismatch::Selected toolchain targets aarch64 Linux but runner is $host_arch. Use 'toolchain_host=aarch64' only on ARM64 runners, or provide a matching 'toolchain_url'."
-                ok=0
-              else
-                "$b" --version | head -n1 || true
-              fi
-            fi
+            if ! command -v "$b" >/dev/null 2>&1; then echo "::error title=Missing::$b not found"; ok=0; else which "$b"; "$b" --version | head -n1 || true; fi
           done
-          echo ::endgroup::
-          if [[ $ok -ne 1 ]]; then
-            exit 1
-          fi
+          [[ $ok -eq 1 ]] || { echo "::error title=ARM64EC toolchain incomplete::Provide toolchain_url for a working build"; exit 1; }
 
       - name: Cache ccache
         uses: actions/cache@v4
@@ -232,11 +165,9 @@ jobs:
             ccache-${{ runner.os }}-
 
       - name: Install build deps (incl. Debian Wine control.in hints)
-        shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           sudo apt-get update -y -o Acquire::Retries=3
-          # NOTE: 중간에 주석 넣으면 백슬래시 라인-컨티뉴가 깨져 다음 줄이 명령으로 실행됨
           sudo apt-get install -y --no-install-recommends \
             build-essential clang lld git curl jq xz-utils zstd rsync pkg-config \
             bison flex gettext autoconf automake libtool \
@@ -254,19 +185,14 @@ jobs:
 
       - name: Resolve wine tag -> commit (peeled)
         id: pin
-        shell: bash
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           TAG='${{ inputs.wine_tag }}'
-          # Try peeled commit for annotated tags first
           git ls-remote --tags https://github.com/ValveSoftware/wine.git "refs/tags/${TAG}^{}" > out.txt || true
           if [[ ! -s out.txt ]]; then
             git ls-remote --tags https://github.com/ValveSoftware/wine.git "refs/tags/${TAG}" > out.txt || true
           fi
-          if [[ ! -s out.txt ]]; then
-            echo "Tag not found: ${TAG}" >&2
-            exit 1
-          fi
+          [[ -s out.txt ]] || { echo "Tag not found: ${TAG}" >&2; exit 1; }
           SHA=$(awk '{print $1}' out.txt)
           echo "wine_sha=$SHA" >> $GITHUB_OUTPUT
           echo "Pinned wine: $SHA"
@@ -281,14 +207,63 @@ jobs:
       - name: Bootstrap configure (autogen.sh)
         working-directory: src-wine
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           ./autogen.sh
           test -x configure || { echo "autogen.sh did not produce ./configure" >&2; exit 1; }
+
+      - name: Install elegant target shims for clang/clang++ (map arm64ec-windows -> arm64ec-w64-mingw32)
+        run: |
+          set -Eeuo pipefail
+          SHIMS_DIR="${GITHUB_WORKSPACE}/.shims"; mkdir -p "$SHIMS_DIR"
+          REAL_CLANG="$(command -v clang)"; REAL_CLANGXX="$(command -v clang++)"
+          cat >"$SHIMS_DIR/clang" <<'EOF'
+          #!/usr/bin/env bash
+          fix_arg() {
+            local out=()
+            local prev=""
+            for a in "$@"; do
+              if [[ "$prev" == "-target" && "$a" == "arm64ec-windows" ]]; then
+                out+=("arm64ec-w64-mingw32")
+              elif [[ "$a" == "-target=arm64ec-windows" ]]; then
+                out+=("--target=arm64ec-w64-mingw32")
+              else
+                out+=("$a")
+              fi
+              prev="$a"
+            done
+            printf '%q ' "${out[@]}"
+          }
+          exec "${REAL_CLANG}" $(fix_arg "$@")
+          EOF
+          chmod +x "$SHIMS_DIR/clang"
+
+          cat >"$SHIMS_DIR/clang++" <<'EOF'
+          #!/usr/bin/env bash
+          fix_arg() {
+            local out=()
+            local prev=""
+            for a in "$@"; do
+              if [[ "$prev" == "-target" && "$a" == "arm64ec-windows" ]]; then
+                out+=("arm64ec-w64-mingw32")
+              elif [[ "$a" == "-target=arm64ec-windows" ]]; then
+                out+=("--target=arm64ec-w64-mingw32")
+              else
+                out+=("$a")
+              fi
+              prev="$a"
+            done
+            printf '%q ' "${out[@]}"
+          }
+          exec "${REAL_CLANGXX}" $(fix_arg "$@")
+          EOF
+          chmod +x "$SHIMS_DIR/clang++"
+
+          # Ensure shims precede toolchain bin
+          echo "PATH=${SHIMS_DIR}:$PATH" >> $GITHUB_ENV
 
       - name: Configure (ARM64EC + AArch64 + i386) with clang
         working-directory: src-wine
         env:
-          # Force Wine's configure to use the right cross compilers and ccache wrappers.
           arm64ec_CC: ccache arm64ec-w64-mingw32-clang
           arm64ec_CXX: ccache arm64ec-w64-mingw32-clang++
           aarch64_CC: ccache aarch64-w64-mingw32-clang
@@ -300,7 +275,7 @@ jobs:
           AR: llvm-ar
           RANLIB: llvm-ranlib
         run: |
-          set -euo pipefail
+          set -Eeuo pipefail
           which arm64ec-w64-mingw32-clang
           which aarch64-w64-mingw32-clang
           which i686-w64-mingw32-clang
@@ -325,38 +300,22 @@ jobs:
                  "${STAGE}/share/mime" || true
 
       - name: Verify required lib/wine triplets
-        shell: bash
         run: |
-          set -euo pipefail
-
+          set -Eeuo pipefail
           missing=0
           ST_PATH="${STAGE}"
-
           for d in aarch64-unix aarch64-windows i386-windows; do
-            if [[ ! -d "$ST_PATH/lib/wine/$d" ]]; then
-              echo "::error title=Missing triplet::$d missing under lib/wine"
-              missing=1
-            fi
+            [[ -d "$ST_PATH/lib/wine/$d" ]] || { echo "::error title=Missing triplet::$d missing"; missing=1; }
           done
+          [[ -f "$ST_PATH/share/wine/wine.inf" ]] || { echo "::error title=Missing wine.inf::share/wine/wine.inf missing"; missing=1; }
 
-          if [[ ! -f "$ST_PATH/share/wine/wine.inf" ]]; then
-            echo "::error title=Missing wine.inf::share/wine/wine.inf missing"
-            missing=1
-          fi
-
-          # Safe listings without fragile quoting
           echo ::group::bin
-          if [[ -d "$ST_PATH/bin" ]]; then
-            find "$ST_PATH/bin" -maxdepth 1 -type f -print0 | xargs -0 -r -n1 basename | sort || true
-          fi
+          [[ -d "$ST_PATH/bin" ]] && find "$ST_PATH/bin" -maxdepth 1 -type f -print0 | xargs -0 -r -n1 basename | sort || true
           echo ::endgroup::
 
           echo ::group::lib/wine
-          if [[ -d "$ST_PATH/lib/wine" ]]; then
-            find "$ST_PATH/lib/wine" -maxdepth 1 -mindepth 1 -type d -print0 | xargs -0 -r -n1 basename | sort || true
-          fi
+          [[ -d "$ST_PATH/lib/wine" ]] && find "$ST_PATH/lib/wine" -maxdepth 1 -mindepth 1 -type d -print0 | xargs -0 -r -n1 basename | sort || true
           echo ::endgroup::
-
           exit ${missing}
 
       - name: Pack runtime (tar.xz, multi-thread)
