@@ -6,7 +6,7 @@ on:
         required: true
         default: 'proton-wine-10.0-2d'
       toolchain_url:
-        description: 'Override URL for llvm-mingw toolchain asset (Linux/Ubuntu tar.*). If empty, auto-select (prefers bylaws ubuntu-20.04 x86_64).'
+        description: 'Override URL for llvm-mingw toolchain asset (Linux/Ubuntu tar.*). If empty, auto-select (prefers bylaws ubuntu-20.04 x86_64 with ARM64EC CRT/UCRT).'
         required: false
         default: ''
 
@@ -55,6 +55,7 @@ jobs:
             exit 0
           fi
 
+          # host arch pattern for generic fallback
           host=$(uname -m)
           case "$host" in
             x86_64|amd64) host_pat='(x86_64|amd64|x64)';;
@@ -70,6 +71,7 @@ jobs:
             echo "::error title=GitHub API error::HTTP $http from $api"; sed -n '1,120p' "$tmp_json" || true; exit 1
           fi
 
+          # Prefer Ubuntu 20.04 x86_64 cross toolchain assets that include ARM64EC support
           jq_first_ubuntu2004=$(mktemp)
           cat >"$jq_first_ubuntu2004" <<'JQ'
             .[] | .tag_name as $tag | .assets[]? | select(
@@ -128,7 +130,6 @@ jobs:
         run: echo "PATH=${{ env.LLVM_TC_DIR }}/bin:$PATH" >> $GITHUB_ENV
 
       - name: Sanity probe clang path and arm64ec target
-        shell: bash
         run: |
           set -Eeuo pipefail
           echo ::group::clang
@@ -139,14 +140,12 @@ jobs:
           echo ::group::arm64ec-probe
           set +e
           printf 'int main(void){return 0;}' > t.c
-          # Use target triplet form and avoid Windows-only /SUBSYSTEM flags here
-          clang --target=arm64ec-w64-mingw32 -fuse-ld=lld -v t.c -o t.exe
+          arm64ec-w64-mingw32-clang -v t.c -o t.exe
           stat t.exe || true
           rm -f t.c t.exe || true
           echo ::endgroup::
 
       - name: Verify ARM64EC toolchain presence (fail-fast)
-        shell: bash
         run: |
           set -Eeuo pipefail
           need="arm64ec-w64-mingw32-clang arm64ec-w64-mingw32-clang++ aarch64-w64-mingw32-clang i686-w64-mingw32-clang llvm-dlltool llvm-windres lld-link"
@@ -154,15 +153,39 @@ jobs:
           for b in $need; do
             if ! command -v "$b" >/dev/null 2>&1; then echo "::error title=Missing::$b not found"; ok=0; else which "$b"; "$b" --version | head -n1 || true; fi
           done
+          # quick presence checks for ARM64EC CRT + UCRT import libs
+          test -f "$LLVM_TC_DIR/arm64ec-w64-mingw32/lib/libucrt.a" || { echo '::error title=Missing UCRT import lib::libucrt.a not found for arm64ec'; ok=0; }
+          test -f "$LLVM_TC_DIR/arm64ec-w64-mingw32/lib/libvcruntime.a" || { echo '::warning title=Missing vcruntime import lib::trying to proceed'; }
+          test -f "$LLVM_TC_DIR/arm64ec-w64-mingw32/lib/crt2.o" || { echo '::error title=Missing CRT startup::crt2.o not found for arm64ec'; ok=0; }
           if [[ $ok -ne 1 ]]; then
-            echo "::error title=ARM64EC toolchain incomplete::Provide toolchain_url for a working build"; exit 1
+            echo "::error title=ARM64EC toolchain incomplete::Provide toolchain_url to a build that ships ARM64EC CRT + UCRT (see job logs for hints)"; exit 1
           fi
+
+      - name: Self-test link a tiny ARM64EC program (must resolve __os_arm64x_*, memcpy/memset)
+        run: |
+          set -Eeuo pipefail
+          cat > t.c <<'C'
+          typedef int (*fn)(int);
+          int foo(int x){ return x+1; }
+          int main(){ fn f = foo; return f(41); }
+          C
+          set +e
+          arm64ec-w64-mingw32-clang t.c -o t.exe 2> build.log
+          st=$?
+          set -e
+          if (( st != 0 )); then
+            echo '--- build.log (tail) ---'
+            tail -n 200 build.log || true
+            echo '::error title=ARM64EC link self-test failed::__os_arm64x_* or C runtime unresolved. Use a newer llvm-mingw (with ARM64EC CRT) or pass inputs.toolchain_url.'
+            exit 1
+          fi
+          rm -f t.c t.exe build.log
 
       - name: Cache ccache
         uses: actions/cache@v4
         with:
           path: ${{ env.CCACHE_DIR }}
-          key: ccache-${{ runner.os }}-${{ inputs.wine_tag }}-${{ steps.tcmeta.outputs.tag }}-v1
+          key: ccache-${{ runner.os }}-${{ inputs.wine_tag }}-${{ steps.tcmeta.outputs.tag }}-v2
           restore-keys: |
             ccache-${{ runner.os }}-
 
@@ -183,15 +206,14 @@ jobs:
             libgnutls28-dev liblcms2-dev libkrb5-dev libcups2-dev \
             libgphoto2-dev libsane-dev libmpg123-dev libsdl2-dev libopenal-dev \
             libosmesa6-dev libvkd3d-dev libgstreamer-plugins-base1.0-dev \
-            libgstreamer1.0-dev libcapi20-dev libxslt1-dev libxml2-dev libglu1-mesa-dev \
-            libgettextpo-dev
+            libgstreamer1.0-dev libcapi20-dev libxslt1-dev libxml2-dev libglu1-mesa-dev
 
       - name: Resolve wine tag -> commit (peeled)
         id: pin
         run: |
           set -Eeuo pipefail
           TAG='${{ inputs.wine_tag }}'
-          git ls-remote --tags https://github.com/ValveSoftware/wine.git "refs/tags/${TAG}^{ }" > out.txt || true
+          git ls-remote --tags https://github.com/ValveSoftware/wine.git "refs/tags/${TAG}^{}" > out.txt || true
           if [[ ! -s out.txt ]]; then
             git ls-remote --tags https://github.com/ValveSoftware/wine.git "refs/tags/${TAG}" > out.txt || true
           fi
@@ -214,35 +236,29 @@ jobs:
           ./autogen.sh
           test -x configure || { echo "autogen.sh did not produce ./configure" >&2; exit 1; }
 
-      # Removed shim step that rewrote PE flags; clang drivers handle this with -fuse-ld=lld
-
       - name: Configure (ARM64EC + AArch64 + i386) with clang
-        shell: bash
         working-directory: src-wine
         env:
           CONFIG_SHELL: /usr/bin/bash
-          arm64ec_CC: ccache arm64ec-w64-mingw32-clang -fuse-ld=lld
-          arm64ec_CXX: ccache arm64ec-w64-mingw32-clang++ -fuse-ld=lld
-          aarch64_CC: ccache aarch64-w64-mingw32-clang -fuse-ld=lld
-          aarch64_CXX: ccache aarch64-w64-mingw32-clang++ -fuse-ld=lld
-          i386_CC: ccache i686-w64-mingw32-clang -fuse-ld=lld
-          i386_CXX: ccache i686-w64-mingw32-clang++ -fuse-ld=lld
+          arm64ec_CC: ccache arm64ec-w64-mingw32-clang
+          arm64ec_CXX: ccache arm64ec-w64-mingw32-clang++
+          # lld-link is the default; do NOT pass the unsupported -flavor,link here
+          arm64ec_LDFLAGS: ""
+          aarch64_CC: ccache aarch64-w64-mingw32-clang
+          aarch64_CXX: ccache aarch64-w64-mingw32-clang++
+          aarch64_LDFLAGS: ""
+          i386_CC: ccache i686-w64-mingw32-clang
+          i386_CXX: ccache i686-w64-mingw32-clang++
+          i386_LDFLAGS: ""
           DLLTOOL: llvm-dlltool
           WINDRES: llvm-windres
           AR: llvm-ar
           RANLIB: llvm-ranlib
         run: |
           set -Eeuo pipefail
-          echo ::group::tooling
-          echo "PATH=$PATH"
-          type -ap clang || true
-          which arm64ec-w64-mingw32-clang || true
-          which aarch64-w64-mingw32-clang || true
-          which i686-w64-mingw32-clang || true
-          echo ::endgroup::
-
           mkdir -p build && cd build
 
+          # Run configure with trace and capture logs
           set +e
           bash -x ../configure \
             --enable-archs=arm64ec,aarch64,i386 \
