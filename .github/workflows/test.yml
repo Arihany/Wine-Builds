@@ -217,14 +217,40 @@ jobs:
           [[ -s out.txt ]] || { echo "Tag not found: ${TAG}" >&2; exit 1; }
           SHA=$(awk '{print $1}' out.txt)
           echo "wine_sha=$SHA" >> $GITHUB_OUTPUT
-          echo "Pinned wine: $SHA"
-
-      - name: Checkout Valve wine at pinned tag
+          echo "Pinned wine: $SHA"$1
+      - name: Drop ARM64EC SDK shim header (Proton tag compat)
         run: |
-          git clone https://github.com/ValveSoftware/wine.git src-wine
-          git -C src-wine fetch --depth=1 origin ${{ steps.pin.outputs.wine_sha }}
-          git -C src-wine checkout ${{ steps.pin.outputs.wine_sha }}
-          git -C src-wine log -1 --oneline
+          set -Eeuo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/src-wine/include"
+          cat > "$GITHUB_WORKSPACE/src-wine/include/arm64ec-sdk-shim.h" <<'H'
+          #ifndef WINE_ARM64EC_SDK_SHIM_H
+          #define WINE_ARM64EC_SDK_SHIM_H 1
+          #if defined(__arm64ec__) || defined(__ARM64EC__) || defined(_M_ARM64EC)
+          /* Minimal decls for Proton-wine headers that lack EC SDK types */
+          #ifndef __has_include
+          #define __has_include(x) 0
+          #endif
+          /* Provide only if not already supplied */
+          #ifndef _DISPATCHER_CONTEXT_ARM64EC_DEFINED
+          typedef struct _WINE_DISPATCHER_CONTEXT_ARM64EC {
+              void *NonVolatileRegisters;
+              unsigned char ControlPcIsUnwound;
+          } DISPATCHER_CONTEXT_ARM64EC, *PDISPATCHER_CONTEXT_ARM64EC;
+          #define _DISPATCHER_CONTEXT_ARM64EC_DEFINED 1
+          #endif
+          #ifndef _RTL_IS_EC_CODE_DECLARED
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          int RtlIsEcCode(unsigned long long pc);
+          #ifdef __cplusplus
+          }
+          #endif
+          #define _RTL_IS_EC_CODE_DECLARED 1
+          #endif
+          #endif /* EC */
+          #endif /* guard */
+          H
 
       - name: Bootstrap configure (autogen.sh)
         working-directory: src-wine
@@ -240,7 +266,7 @@ jobs:
           CONFIG_SHELL: /usr/bin/bash
           arm64ec_CC: ccache arm64ec-w64-mingw32-gcc
           arm64ec_CXX: ccache arm64ec-w64-mingw32-g++
-          arm64ec_CPPFLAGS: -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00
+          arm64ec_CPPFLAGS: -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 -include $GITHUB_WORKSPACE/src-wine/include/arm64ec-sdk-shim.h
           arm64ec_CFLAGS: -U__x86_64__ -U_M_X64 -U_M_AMD64 -D__arm64ec__ -D__ARM64EC__ -D_M_ARM64EC=1 -D__aarch64__ -D_M_ARM64=1 -Wno-pragma-pack -fno-strict-aliasing -ffunction-sections -gdwarf-4
           arm64ec_CXXFLAGS: -U__x86_64__ -U_M_X64 -U_M_AMD64 -D__arm64ec__ -D__ARM64EC__ -D_M_ARM64EC=1 -D__aarch64__ -D_M_ARM64=1 -Wno-pragma-pack -fno-strict-aliasing -ffunction-sections -gdwarf-4
           aarch64_CC: ccache aarch64-w64-mingw32-gcc
