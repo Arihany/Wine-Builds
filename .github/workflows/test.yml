@@ -151,14 +151,6 @@ jobs:
           rm -f t.c t.exe || true
           echo ::endgroup::
 
-          echo ::group::arm64ec-probe
-          set +e
-          printf 'int main(void){return 0;}' > t.c
-          clang -target arm64ec-windows -fuse-ld=lld -Wl,-subsystem:console -Wl,-WX -v t.c -o t.exe
-          stat t.exe || true
-          rm -f t.c t.exe || true
-          echo ::endgroup::
-
       - name: Verify ARM64EC toolchain presence (fail-fast)
         shell: bash
         run: |
