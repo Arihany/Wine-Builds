@@ -22,7 +22,7 @@ concurrency:
 
 defaults:
   run:
-    shell: bash
+    shell: 'bash --noprofile --norc -Eeuo pipefail {0}'
 
 jobs:
   build:
@@ -131,8 +131,15 @@ jobs:
         run: echo "PATH=${{ env.LLVM_TC_DIR }}/bin:$PATH" >> $GITHUB_ENV
 
       - name: Sanity probe clang path and arm64ec target
+        shell: bash
         run: |
           set -Eeuo pipefail
+          echo ::group::shell
+          echo "SHELL=${SHELL:-}"
+          echo "BASH_VERSION=${BASH_VERSION:-n/a}"
+          ps -p $$ -o comm=
+          echo ::endgroup::
+
           echo ::group::clang
           which clang || true
           clang --version || true
@@ -146,15 +153,26 @@ jobs:
           rm -f t.c t.exe || true
           echo ::endgroup::
 
+          echo ::group::arm64ec-probe
+          set +e
+          printf 'int main(void){return 0;}' > t.c
+          clang -target arm64ec-windows -fuse-ld=lld -Wl,-subsystem:console -Wl,-WX -v t.c -o t.exe
+          stat t.exe || true
+          rm -f t.c t.exe || true
+          echo ::endgroup::
+
       - name: Verify ARM64EC toolchain presence (fail-fast)
+        shell: bash
         run: |
           set -Eeuo pipefail
-          need=(arm64ec-w64-mingw32-clang arm64ec-w64-mingw32-clang++ aarch64-w64-mingw32-clang i686-w64-mingw32-clang llvm-dlltool llvm-windres lld-link)
+          need="arm64ec-w64-mingw32-clang arm64ec-w64-mingw32-clang++ aarch64-w64-mingw32-clang i686-w64-mingw32-clang llvm-dlltool llvm-windres lld-link"
           ok=1
-          for b in "${need[@]}"; do
+          for b in $need; do
             if ! command -v "$b" >/dev/null 2>&1; then echo "::error title=Missing::$b not found"; ok=0; else which "$b"; "$b" --version | head -n1 || true; fi
           done
-          [[ $ok -eq 1 ]] || { echo "::error title=ARM64EC toolchain incomplete::Provide toolchain_url for a working build"; exit 1; }
+          if [[ $ok -ne 1 ]]; then
+            echo "::error title=ARM64EC toolchain incomplete::Provide toolchain_url for a working build"; exit 1
+          fi
 
       - name: Cache ccache
         uses: actions/cache@v4
