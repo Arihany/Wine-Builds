@@ -11,7 +11,15 @@ on:
         description: 'Override URL for ARM64EC llvm-mingw toolchain asset from bylaws/llvm-mingw releases (optional)'
         required: false
         default: ''
-
+      toolchain_host:
+        description: 'Host arch for llvm-mingw asset selection: auto | x86_64 | aarch64'
+        required: false
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - x86_64
+          - aarch64
 permissions:
   contents: read
   actions: read
@@ -57,8 +65,14 @@ jobs:
             exit 0
           fi
 
-          # 2) Detect host arch to choose the right cross-compiler package
-          host=$(uname -m)
+          # 2) Decide host arch pattern (override-able)
+          case '${{ inputs.toolchain_host }}' in
+            auto|'') host=$(uname -m) ;;
+            x86_64|amd64|x64) host=x86_64 ;;
+            aarch64|arm64) host=aarch64 ;;
+            *) echo "Invalid toolchain_host: ${{ inputs.toolchain_host }}" >&2; exit 1 ;;
+          esac
+
           case "$host" in
             x86_64|amd64) host_pat='(x86_64|amd64|x64)';;
             aarch64|arm64) host_pat='(aarch64|arm64)';;
@@ -83,15 +97,26 @@ jobs:
             exit 1
           fi
 
-          # Build jq filter: require explicit arm64ec toolchain assets
-          jq_arm64ec="$(mktemp)"
-          cat >"$jq_arm64ec" <<'JQ'
+          # Build jq filters: prefer ubuntu-20.04 x86_64 asset (proven working), then fall back to host-arch generic Linux/Ubuntu
+          jq_prefer_2004_x86_64="$(mktemp)"
+          cat >"$jq_prefer_2004_x86_64" <<'JQ'
             .[]
             | .tag_name as $tag
             | .assets[]?
             | select(
-                (.name | test("(?i)llvm-mingw-.*-(ubuntu|linux)-.*")) and
-                (.name | test("(?i)arm64ec")) and
+                (.name | test("(?i)llvm-mingw-.*-ubuntu-20[.]04-x86_64[.]tar[.](xz|zst|gz)$"))
+              )
+            | [$tag, .browser_download_url]
+            | @tsv
+          JQ
+
+          jq_generic="$(mktemp)"
+          cat >"$jq_generic" <<'JQ'
+            .[]
+            | .tag_name as $tag
+            | .assets[]?
+            | select(
+                (.name | test("(?i)llvm-mingw-.*-(ubuntu|linux)-")) and
                 (.name | test(env.HOST_PAT)) and
                 (.name | test("[.]tar[.](xz|zst|gz)$"))
               )
@@ -99,11 +124,17 @@ jobs:
             | @tsv
           JQ
 
-          HOST_PAT="$host_pat" jq -r -f "$jq_arm64ec" "$tmp_json" | head -n1 > match.txt || true
+          # 1st preference: ubuntu-20.04-x86_64 tarball (user-proven good)
+          jq -r -f "$jq_prefer_2004_x86_64" "$tmp_json" | head -n1 > match.txt || true
+
+          # Fallback: generic Linux/Ubuntu tarball matching host arch
+          if [[ ! -s match.txt ]]; then
+            HOST_PAT="$host_pat" jq -r -f "$jq_generic" "$tmp_json" | head -n1 > match.txt || true
+          fi
 
           if [[ ! -s match.txt ]]; then
-            echo "::error title=No ARM64EC toolchain asset found::Searched last ${per_page} releases of bylaws/llvm-mingw."
-            echo "Hint: Provide 'toolchain_url' input pointing to an ARM64EC-enabled llvm-mingw Linux/Ubuntu tarball."
+            echo "::error title=No matching llvm-mingw Linux asset::Searched last ${per_page} releases; host_pat=$host_pat"
+            echo "Hint: Provide 'toolchain_url' input (e.g. bylaws 'llvm-mingw-<date>-ucrt-ubuntu-20.04-x86_64.tar.xz')."
             echo "Sample asset names from latest release:"
             jq -r '.[0].assets[]?.name' "$tmp_json" | head -n20 || true
             exit 1
@@ -114,7 +145,7 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-          rm -f "$tmp_json" "$jq_arm64ec" match.txt
+          rm -f "$tmp_json" "$jq_prefer_2004_x86_64" "$jq_generic" match.txt
 
       - name: Cache toolchain (extracted)
         id: cache_tc
@@ -143,7 +174,7 @@ jobs:
       - name: Add toolchain to PATH
         run: echo "PATH=${{ env.LLVM_TC_DIR }}/bin:$PATH" >> $GITHUB_ENV
 
-      - name: Sanity probe which clang and arm64ec target
+      - name: Sanity probe: which clang and arm64ec target
         shell: bash
         run: |
           set -euo pipefail
@@ -169,17 +200,26 @@ jobs:
           ok=1
           echo ::group::toolchain-binaries
           for b in "${need[@]}"; do
-            if ! command -v "$b" >/dev/null 2>&1; then
-              echo "::error title=ARM64EC toolchain missing::$b not found in PATH (toolchain likely lacks ARM64EC).";
+            if ! which "$b" >/dev/null 2>&1; then
+              echo "::error title=ARM64EC toolchain missing::$b not found in PATH.";
               ok=0
             else
-              which "$b"
-              "$b" --version | head -n1 || true
+              p=$(which "$b")
+              echo "$p"
+              # Don't execute foreign-arch binaries; identify instead.
+              if file -b "$p" | grep -qiE 'aarch64|arm64'; then bin_arch=aarch64; else bin_arch=x86_64; fi
+              host_arch=$(uname -m)
+              echo "binary-arch=$bin_arch host-arch=$host_arch"
+              if [[ "$bin_arch" =~ aarch64 && ! "$host_arch" =~ (aarch64|arm64) ]]; then
+                echo "::error title=Host/Toolchain arch mismatch::Selected toolchain targets aarch64 Linux but runner is $host_arch. Use 'toolchain_host=aarch64' only on ARM64 runners, or provide a matching 'toolchain_url'."
+                ok=0
+              else
+                "$b" --version | head -n1 || true
+              fi
             fi
           done
           echo ::endgroup::
           if [[ $ok -ne 1 ]]; then
-            echo '::error title=Missing ARM64EC support::The selected llvm-mingw does not provide ARM64EC. Use workflow input '"'toolchain_url'"' to point to an ARM64EC-enabled build (e.g. bylaws/llvm-mingw releases).'
             exit 1
           fi
 
