@@ -229,30 +229,32 @@ jobs:
           ./autogen.sh
           test -x configure || { echo "autogen.sh did not produce ./configure" >&2; exit 1; }
 
-      - name: Install elegant target shims for clang/clang++ (map arm64ec-windows -> arm64ec-w64-mingw32, robust)
+      - name: Install elegant target shims for clang/clang++ (map arm64ec-windows -> arm64ec-w64-mingw32; fix PE link flags)
+        shell: bash
         run: |
           set -Eeuo pipefail
           SHIMS_DIR="${GITHUB_WORKSPACE}/.shims"; mkdir -p "$SHIMS_DIR"
 
-          # clang wrapper (no variable expansion at write-time; array-safe; avoids recursion)
+          # clang wrapper: array-safe, no recursion, and converts PE link flags when targeting arm64ec
           cat >"$SHIMS_DIR/clang" <<'SH'
           #!/usr/bin/env bash
           set -Eeuo pipefail
           self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
           shim_dir="$(dirname "$self")"
-          # pick the first clang in PATH that is not this shim
           real="$(type -ap clang | grep -v "^${shim_dir}/clang$" | head -n1)"
-          if [[ -z "${real:-}" ]]; then
-            real="$(command -v clang)"
-          fi
+          : "${real:=$(command -v clang)}"
+
           args=()
           prev_is_target=0
+          is_ec=0
           for a in "$@"; do
             if [[ $prev_is_target -eq 1 ]]; then
+              # -target <val>
               if [[ "$a" == "arm64ec-windows" ]]; then
-                args+=("arm64ec-w64-mingw32")
+                args+=("arm64ec-w64-mingw32"); is_ec=1
               else
                 args+=("$a")
+                [[ "$a" == "arm64ec-w64-mingw32" ]] && is_ec=1
               fi
               prev_is_target=0
               continue
@@ -261,12 +263,33 @@ jobs:
               -target)
                 args+=("$a"); prev_is_target=1 ;;
               -target=arm64ec-windows)
-                args+=("--target=arm64ec-w64-mingw32") ;;
+                args+=("--target=arm64ec-w64-mingw32"); is_ec=1 ;;
+              --target=arm64ec-w64-mingw32)
+                args+=("$a"); is_ec=1 ;;
               *)
                 args+=("$a") ;;
             esac
           done
-          exec "$real" "${args[@]}"
+
+          if [[ $is_ec -eq 1 ]]; then
+            # Second pass: translate GNU-style forwarded PE flags to lld-link MSVC style
+            out=()
+            for a in "${args[@]}"; do
+              case "$a" in
+                -Wl,-subsystem:console)
+                  out+=("-Wl,/SUBSYSTEM:CONSOLE") ;;
+                -Wl,-WX)
+                  out+=("-Wl,/WX") ;;
+                -Wl,-subsystem:console,*)
+                  out+=("-Wl,/SUBSYSTEM:CONSOLE${a#-Wl,-subsystem:console}") ;;
+                *)
+                  out+=("$a") ;;
+              esac
+            done
+            exec "$real" "${out[@]}"
+          else
+            exec "$real" "${args[@]}"
+          fi
           SH
           chmod +x "$SHIMS_DIR/clang"
 
@@ -277,17 +300,18 @@ jobs:
           self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
           shim_dir="$(dirname "$self")"
           real="$(type -ap clang++ | grep -v "^${shim_dir}/clang\+\+$" | head -n1)"
-          if [[ -z "${real:-}" ]]; then
-            real="$(command -v clang++)"
-          fi
+          : "${real:=$(command -v clang++)}"
+
           args=()
           prev_is_target=0
+          is_ec=0
           for a in "$@"; do
             if [[ $prev_is_target -eq 1 ]]; then
               if [[ "$a" == "arm64ec-windows" ]]; then
-                args+=("arm64ec-w64-mingw32")
+                args+=("arm64ec-w64-mingw32"); is_ec=1
               else
                 args+=("$a")
+                [[ "$a" == "arm64ec-w64-mingw32" ]] && is_ec=1
               fi
               prev_is_target=0
               continue
@@ -296,23 +320,47 @@ jobs:
               -target)
                 args+=("$a"); prev_is_target=1 ;;
               -target=arm64ec-windows)
-                args+=("--target=arm64ec-w64-mingw32") ;;
+                args+=("--target=arm64ec-w64-mingw32"); is_ec=1 ;;
+              --target=arm64ec-w64-mingw32)
+                args+=("$a"); is_ec=1 ;;
               *)
                 args+=("$a") ;;
             esac
           done
-          exec "$real" "${args[@]}"
+
+          if [[ $is_ec -eq 1 ]]; then
+            out=()
+            for a in "${args[@]}"; do
+              case "$a" in
+                -Wl,-subsystem:console)
+                  out+=("-Wl,/SUBSYSTEM:CONSOLE") ;;
+                -Wl,-WX)
+                  out+=("-Wl,/WX") ;;
+                -Wl,-subsystem:console,*)
+                  out+=("-Wl,/SUBSYSTEM:CONSOLE${a#-Wl,-subsystem:console}") ;;
+                *)
+                  out+=("$a") ;;
+              esac
+            done
+            exec "$real" "${out[@]}"
+          else
+            exec "$real" "${args[@]}"
+          fi
           SH
           chmod +x "$SHIMS_DIR/clang++"
 
-          # Ensure shims precede toolchain bin
           echo "PATH=${SHIMS_DIR}:$PATH" >> $GITHUB_ENV
 
-          # Smoke-test wrapper: plain clang must work; target mapping shouldn't crash the wrapper
-          echo 'int main(void){return 0;}' > t.c
+          # Smoke-tests: both target forms and PE flags should compile/link
+          cat > t.c <<'C'
+          int main(void){return 0;}
+          C
+          # Plain compile
           clang -c t.c -o t.o
-          clang -target arm64ec-windows -c t.c -o t2.o || true
-          rm -f t.c t.o t2.o || true
+          # With arm64ec target and PE flags (wrapper will map them)
+          clang -target arm64ec-windows --target=arm64ec-w64-mingw32 -fuse-ld=lld -Wl,-subsystem:console -Wl,-WX t.c -o t1.exe || true
+          clang --target=arm64ec-w64-mingw32              -fuse-ld=lld -Wl,-subsystem:console -Wl,-WX t.c -o t2.exe || true
+          rm -f t.c t.o t1.exe t2.exe || true
 
       - name: Configure (ARM64EC + AArch64 + i386) with clang
         shell: bash
