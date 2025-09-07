@@ -83,7 +83,7 @@ jobs:
             exit 1
           fi
 
-          # Build jq filters to avoid shell-escape issues
+          # Build jq filter: require explicit arm64ec toolchain assets
           jq_arm64ec="$(mktemp)"
           cat >"$jq_arm64ec" <<'JQ'
             .[]
@@ -99,28 +99,11 @@ jobs:
             | @tsv
           JQ
 
-          jq_generic="$(mktemp)"
-          cat >"$jq_generic" <<'JQ'
-            .[]
-            | .tag_name as $tag
-            | .assets[]?
-            | select(
-                (.name | test("(?i)llvm-mingw-.*-(ubuntu|linux)-.*")) and
-                (.name | test(env.HOST_PAT)) and
-                (.name | test("[.]tar[.](xz|zst|gz)$"))
-              )
-            | [$tag, .browser_download_url]
-            | @tsv
-          JQ
-
-          # Prefer explicit *arm64ec* toolchains, fall back to generic if none match
           HOST_PAT="$host_pat" jq -r -f "$jq_arm64ec" "$tmp_json" | head -n1 > match.txt || true
-          if [[ ! -s match.txt ]]; then
-            HOST_PAT="$host_pat" jq -r -f "$jq_generic" "$tmp_json" | head -n1 > match.txt || true
-          fi
 
           if [[ ! -s match.txt ]]; then
-            echo "::error title=No matching asset::Searched last ${per_page} releases; host_pat=$host_pat"
+            echo "::error title=No ARM64EC toolchain asset found::Searched last ${per_page} releases of bylaws/llvm-mingw."
+            echo "Hint: Provide 'toolchain_url' input pointing to an ARM64EC-enabled llvm-mingw Linux/Ubuntu tarball."
             echo "Sample asset names from latest release:"
             jq -r '.[0].assets[]?.name' "$tmp_json" | head -n20 || true
             exit 1
@@ -131,7 +114,7 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "url=$url" >> "$GITHUB_OUTPUT"
 
-          rm -f "$tmp_json" "$jq_arm64ec" "$jq_generic" match.txt
+          rm -f "$tmp_json" "$jq_arm64ec" match.txt
 
       - name: Cache toolchain (extracted)
         id: cache_tc
@@ -160,11 +143,29 @@ jobs:
       - name: Add toolchain to PATH
         run: echo "PATH=${{ env.LLVM_TC_DIR }}/bin:$PATH" >> $GITHUB_ENV
 
+      - name: Sanity probe which clang and arm64ec target
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo ::group::clang-path
+          which clang || true
+          clang --version || true
+          echo ::endgroup::
+          echo ::group::arm64ec-probe
+          set +e
+          cat > t.c <<'EOF'
+          int main(void){return 0;}
+          EOF
+          clang -target arm64ec-windows -fuse-ld=lld -Wl,-subsystem:console -Wl,-WX -v t.c -o t.exe
+          stat t.exe || true
+          rm -f t.c t.exe || true
+          echo ::endgroup::
+
       - name: Verify ARM64EC compiler presence (fail-fast)
         shell: bash
         run: |
           set -euo pipefail
-          need=(arm64ec-w64-mingw32-clang arm64ec-w64-mingw32-clang++ llvm-dlltool llvm-windres)
+          need=(arm64ec-w64-mingw32-clang arm64ec-w64-mingw32-clang++ llvm-dlltool llvm-windres lld-link)
           ok=1
           echo ::group::toolchain-binaries
           for b in "${need[@]}"; do
