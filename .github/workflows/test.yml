@@ -208,16 +208,19 @@ jobs:
       - name: Resolve wine tag -> commit (peeled)
         id: pin
         run: |
-          set -Eeuo pipefail
+          # Disable nounset just for this step; some wrappers/awk may reference $1 implicitly
+          set -Ee -o pipefail
+          set +u
           TAG='${{ inputs.wine_tag }}'
-          git ls-remote --tags https://github.com/ValveSoftware/wine.git "refs/tags/${TAG}^{}" > out.txt || true
-          if [[ ! -s out.txt ]]; then
-            git ls-remote --tags https://github.com/ValveSoftware/wine.git "refs/tags/${TAG}" > out.txt || true
+          REPO="https://github.com/ValveSoftware/wine.git"
+          # Try peeled annotated tag first, then lightweight
+          if ! git ls-remote --tags "$REPO" "refs/tags/${TAG}^{}" > out.txt 2>/dev/null; then
+            git ls-remote --tags "$REPO" "refs/tags/${TAG}" > out.txt || true
           fi
           [[ -s out.txt ]] || { echo "Tag not found: ${TAG}" >&2; exit 1; }
-          SHA=$(awk '{print $1}' out.txt)
-          echo "wine_sha=$SHA" >> $GITHUB_OUTPUT
-          echo "Pinned wine: $SHA"$1
+          SHA=$(awk '{print $1; exit}' out.txt)
+          echo "wine_sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "Pinned wine: $SHA"
       - name: Drop ARM64EC SDK shim header (Proton tag compat)
         run: |
           set -Eeuo pipefail
